@@ -446,11 +446,12 @@ modelCache:
   # per `mode` below.
   enabled: true
   # Cache provisioning mode:
-  #   shared (default): a single cluster-wide "<release>-model-cache" PVC is
-  #     created (honoring accessMode below). The operator mounts it and the
-  #     InferenceService init container downloads remote models into it, so all
-  #     InferenceServices share one cache (cross-isvc dedup) and `llmkube cache
-  #     list` can inspect it. This is the proven default. On a multi-node cluster
+  #   shared (default): a "<release>-model-cache" PVC is created in the operator
+  #     namespace (honoring accessMode below), unless existingClaim is set.
+  #     The operator mounts it. InferenceServices use their namespace's shared
+  #     cache (or spec.modelCache.claimName); existingClaim does not select those
+  #     claims. Shared caches allow cross-isvc dedup and `llmkube cache list`
+  #     can inspect them. On a multi-node cluster
   #     use an RWX storage class (NFS/EFS) so the cache is reachable from any
   #     node; the cluster default RWO class only works single-node.
   #   perService: each InferenceService gets its own RWO, WaitForFirstConsumer
@@ -471,6 +472,16 @@ modelCache:
   # node. On a hard-tainted node, the storage provisioner's helper path must also
   # tolerate the taint; otherwise use a pre-provisioned claim.
   storageClass: ""
+  # Pre-provisioned PVC in the operator namespace, mounted only in shared mode.
+  # When set, the chart does not create or manage a shared cache PVC. This does
+  # not select inference workload claims: use spec.modelCache.claimName on each
+  # InferenceService for those (claims are scoped to the workload namespace).
+  existingClaim: ""
+  # Fail a live install/upgrade if shared caching needs the cluster default
+  # StorageClass and none exists. Offline rendering skips the lookup check.
+  # The Helm caller needs StorageClass list permission. Set false for manually
+  # bound chart-managed claims or restricted callers, and verify binding yourself.
+  requireDefaultStorageClass: true
   # Access mode for the shared cache PVC (only used when mode=shared):
   # ReadWriteOnce (single-node) or ReadWriteMany (multi-node with NFS/EFS).
   # perService caches are always ReadWriteOnce.

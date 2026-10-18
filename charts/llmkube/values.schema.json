@@ -393,6 +393,8 @@
         },
         "size": { "type": "string", "minLength": 1 },
         "storageClass": { "type": "string" },
+        "existingClaim": { "type": "string" },
+        "requireDefaultStorageClass": { "type": "boolean" },
         "accessMode": {
           "type": "string",
           "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]

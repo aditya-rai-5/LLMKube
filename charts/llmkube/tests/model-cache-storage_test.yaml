@@ -1,0 +1,134 @@
+suite: shared model cache StorageClass preflight
+templates:
+  - model-cache-pvc.yaml
+  - extra-objects.yaml
+# Exercise Helm's lookup against a fake Kubernetes API. Offline rendering is
+# covered by model-cache_test.yaml. Empty lists need the helper test below:
+# helm-unittest's dynamic fake cannot LIST a kind with no registered objects.
+kubernetesProvider:
+  scheme:
+    "storage.k8s.io/v1/StorageClass":
+      gvr:
+        group: storage.k8s.io
+        version: v1
+        resource: storageclasses
+      namespaced: false
+  objects:
+    - apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: available-but-not-default
+      provisioner: example.com/storage
+tests:
+  # Removing the helper's failure must make this assertion fail. The lookup
+  # call itself is exercised by the non-default-class cases below.
+  - it: fails with all three remedies when the cluster has no StorageClasses
+    template: extra-objects.yaml
+    set:
+      modelCache.requireDefaultStorageClass: false
+      extraObjects:
+        - '{{ include "llmkube.modelCache.requireDefaultStorageClass" (dict "items" list) }}'
+    asserts:
+      - failedTemplate:
+          errorMessage: "LLMKube shared model cache requires a default StorageClass: none was found. Set modelCache.storageClass, set modelCache.existingClaim to a pre-provisioned PVC in the operator namespace, or use modelCache.mode=perService."
+
+  - it: rejects classes without a default annotation
+    template: model-cache-pvc.yaml
+    kubernetesProvider:
+      objects:
+        - apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: manual
+          provisioner: kubernetes.io/no-provisioner
+    asserts:
+      - failedTemplate:
+          errorMessage: "LLMKube shared model cache requires a default StorageClass: none was found. Set modelCache.storageClass, set modelCache.existingClaim to a pre-provisioned PVC in the operator namespace, or use modelCache.mode=perService."
+
+  - it: rejects an explicitly non-default class
+    template: model-cache-pvc.yaml
+    kubernetesProvider:
+      objects:
+        - apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: non-default
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "false"
+          provisioner: example.com/storage
+    asserts:
+      - failedTemplate:
+          errorMessage: "LLMKube shared model cache requires a default StorageClass: none was found. Set modelCache.storageClass, set modelCache.existingClaim to a pre-provisioned PVC in the operator namespace, or use modelCache.mode=perService."
+
+  - it: renders the PVC when a default class exists
+    template: model-cache-pvc.yaml
+    kubernetesProvider:
+      objects:
+        - apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: default-storage
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          provisioner: example.com/storage
+    asserts:
+      - hasDocuments:
+          count: 1
+      - notExists:
+          path: spec.storageClassName
+
+  - it: accepts the legacy default StorageClass annotation
+    template: model-cache-pvc.yaml
+    kubernetesProvider:
+      objects:
+        - apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: legacy-default
+            annotations:
+              storageclass.beta.kubernetes.io/is-default-class: "true"
+          provisioner: example.com/storage
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: allows opting out for manually bound chart-managed claims
+    template: model-cache-pvc.yaml
+    set:
+      modelCache.requireDefaultStorageClass: false
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: uses an explicit StorageClass without requiring a cluster default
+    template: model-cache-pvc.yaml
+    set:
+      modelCache.storageClass: local-storage
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: local-storage
+
+  - it: skips the preflight and PVC for an existing claim
+    template: model-cache-pvc.yaml
+    set:
+      modelCache.existingClaim: preprovisioned-cache
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: skips the preflight and PVC in perService mode
+    template: model-cache-pvc.yaml
+    set:
+      modelCache.mode: perService
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: skips the preflight and PVC when caching is disabled
+    template: model-cache-pvc.yaml
+    set:
+      modelCache.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

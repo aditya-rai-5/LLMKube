@@ -336,6 +336,38 @@ hand-imported.
 |-----------|-------------|---------|
 | `metalRelay.secretCreatePolicy.enabled` | Install a `ValidatingAdmissionPolicy` and binding that let only the controller's ServiceAccount create the per-namespace Metal relay token Secret `llmkube-metal-relay`. Updates (token rotation) and deletes (revocation) are not restricted. Rendered only when the cluster serves `admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` (Kubernetes 1.30 or newer). Tools that render offline, such as `helm template` or Argo CD, must pass `--api-versions admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy`, or the policy is skipped. | `true` |
 
+### Model cache storage
+
+`modelCache.mode` defaults to `shared`: the operator mounts the chart's cache
+PVC and cannot start until it binds. Set `modelCache.storageClass` for an
+explicit class, or use a pre-provisioned claim in the operator namespace:
+
+```yaml
+modelCache:
+  mode: shared
+  existingClaim: operator-model-cache
+```
+
+`modelCache.existingClaim` defaults to `""`. When set in shared mode, Helm
+mounts that claim and does not create or manage a cache PVC. It only selects
+the operator's mount; use `InferenceService.spec.modelCache.claimName` for
+custom inference cache claims in workload namespaces.
+
+For pre-staged `pvc://` Models without dynamic provisioning, use
+`modelCache.mode: perService`: the operator gets scratch `emptyDir` storage
+and the chart creates no shared PVC. Downloaded models still need storage
+for their per-service caches.
+
+`modelCache.requireDefaultStorageClass` defaults to `true`. Live installs
+and upgrades check for a default StorageClass when shared caching is enabled
+and neither `storageClass` nor `existingClaim` is set. Offline rendering
+skips this check; `--dry-run=server` exercises it. The Helm caller needs
+StorageClass list permission. Set the toggle to `false` for manually bound
+chart-managed claims or restricted Helm callers, and verify binding yourself.
+This checks the default annotation, not provisioner health or PV capacity.
+See the [air-gapped guide](../../docs/site/guides/air-gapped.md#clusters-without-dynamic-provisioning)
+for a static-PV example.
+
 ## Examples
 
 ### Basic Installation

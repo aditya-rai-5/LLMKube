@@ -94,7 +94,8 @@ helm pull llmkube/llmkube --untar
 ```
 
 Transfer the chart directory into the air gap, then install with
-overrides pointing at your registry:
+overrides pointing at your registry. If the cluster has no default
+StorageClass, choose a cache configuration below before installing.
 
 ```bash
 helm install llmkube ./llmkube \
@@ -119,6 +120,72 @@ sets `spec.sha256`). If your registry mirror requires a different image (your ow
 curl, for example), point it here. The chart consumes these as two
 separate fields, not a single `image` value (see
 [`_helpers.tpl`](https://github.com/defilantech/LLMKube/blob/main/charts/llmkube/templates/_helpers.tpl)).
+
+### Clusters without dynamic provisioning
+
+The chart defaults to `modelCache.mode: shared`. The operator itself
+mounts the shared cache PVC, so that claim must bind before the operator
+can start, even when all Models use pre-staged `pvc://` weights.
+
+For pre-staged `pvc://` Models on a cluster without dynamic provisioning,
+add `--set modelCache.mode=perService` to the install command above. The
+operator uses an `emptyDir` scratch volume and the chart creates no shared
+cache PVC. The Models still mount their pre-provisioned source claims.
+`perService` does not supply a storage provisioner: downloaded models
+still need a usable cache StorageClass or an explicit
+`InferenceService.spec.modelCache.claimName` in their own namespace.
+
+To keep a persistent operator cache, create a PVC bound to a
+pre-provisioned PV, such as a local PV on the data array. For example,
+after provisioning a matching 100Gi, ReadWriteOnce PV named
+`llmkube-cache-pv` with an empty storage class:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: operator-model-cache
+  namespace: llmkube-system
+spec:
+  storageClassName: ""
+  volumeName: llmkube-cache-pv
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Gi
+```
+
+Create the namespace and claim before installation. Then add
+`-f cache-values.yaml` to the install command, with:
+
+```yaml
+modelCache:
+  mode: shared
+  existingClaim: operator-model-cache
+```
+
+The claim must be in the operator namespace and writable by the operator;
+a local PV's node affinity must also allow the operator pod to schedule.
+Helm mounts this claim without creating or managing it. This setting only
+selects the operator's mount: inference cache claims are resolved in each
+workload's namespace. To use a custom cache for downloaded weights, set
+`spec.modelCache.claimName` on the InferenceService; `pvc://` Models keep
+using the claim named in their source URL.
+
+If dynamic provisioning is available but no class is the default, set
+`modelCache.storageClass` to the desired class instead.
+
+On live Helm installs and upgrades, `modelCache.requireDefaultStorageClass`
+defaults to `true`: when shared caching has neither an explicit class nor
+an existing claim, the chart checks for a default StorageClass and fails
+with these three remedies if none exists. Offline `helm template` and
+client-side dry runs skip this check because `lookup` has no API response;
+use `--dry-run=server` to exercise it against a cluster. The Helm caller
+needs permission to list StorageClasses. For a deliberately statically
+bound chart-managed claim, or a caller without that permission, set
+`modelCache.requireDefaultStorageClass: false` and verify binding yourself.
+The preflight checks the default annotation, not provisioner health or PV
+capacity, and does not validate claims supplied through `existingClaim`.
 
 ### OpenShift / OKD / MicroShift
 

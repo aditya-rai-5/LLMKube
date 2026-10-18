@@ -1,4 +1,21 @@
 {{/*
+Validate a live StorageClassList, including an empty items list. Kept separate
+from lookup so the empty-cluster case can also be exercised without an API.
+*/}}
+{{- define "llmkube.modelCache.requireDefaultStorageClass" -}}
+{{- $hasDefault := false -}}
+{{- range .items -}}
+{{- $annotations := .metadata.annotations | default dict -}}
+{{- if or (eq (index $annotations "storageclass.kubernetes.io/is-default-class") "true") (eq (index $annotations "storageclass.beta.kubernetes.io/is-default-class") "true") -}}
+{{- $hasDefault = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $hasDefault -}}
+{{- fail "LLMKube shared model cache requires a default StorageClass: none was found. Set modelCache.storageClass, set modelCache.existingClaim to a pre-provisioned PVC in the operator namespace, or use modelCache.mode=perService." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "llmkube.name" -}}

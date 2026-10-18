@@ -128,3 +128,52 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  # Removing existingClaim from the PVC condition must render an unwanted PVC.
+  - it: does not create a shared PVC when an existing claim is supplied
+    template: model-cache-pvc.yaml
+    set:
+      modelCache.existingClaim: preprovisioned-cache
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # Ignoring existingClaim in the Deployment must select the wrong volume.
+  - it: mounts the existing claim in shared mode
+    template: deployment.yaml
+    set:
+      modelCache.existingClaim: preprovisioned-cache
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: model-cache
+            persistentVolumeClaim:
+              claimName: preprovisioned-cache
+
+  - it: ignores existingClaim in perService mode
+    set:
+      modelCache.mode: perService
+      modelCache.existingClaim: preprovisioned-cache
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: model-cache-pvc.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: model-cache
+            emptyDir: {}
+        template: deployment.yaml
+
+  - it: ignores existingClaim when caching is disabled
+    set:
+      modelCache.enabled: false
+      modelCache.existingClaim: preprovisioned-cache
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: model-cache-pvc.yaml
+      - notExists:
+          path: spec.template.spec.volumes[?(@.name == "model-cache")]
+        template: deployment.yaml

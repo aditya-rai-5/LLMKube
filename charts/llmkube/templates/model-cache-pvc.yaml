@@ -1,10 +1,24 @@
 {{- /*
-The shared, cluster-single model cache PVC is created ONLY in shared mode. In
-the default perService mode the operator provisions a per-InferenceService PVC
-at reconcile time (owner-ref'd to the InferenceService), so the chart creates no
-cluster-wide PVC. See values.yaml modelCache.mode.
+The shared model cache PVC is created ONLY in shared mode (the default), unless
+an existing claim is supplied. In perService mode the operator provisions a
+per-InferenceService PVC at reconcile time (owner-ref'd to the InferenceService),
+so the chart creates no shared PVC. See values.yaml modelCache.mode.
 */ -}}
-{{- if and .Values.modelCache.enabled (eq .Values.modelCache.mode "shared") }}
+{{- if and .Values.modelCache.enabled (eq .Values.modelCache.mode "shared") (not .Values.modelCache.existingClaim) }}
+{{- if and .Values.modelCache.requireDefaultStorageClass (not .Values.modelCache.storageClass) }}
+{{- /*
+A live list response has an items key even when the cluster has no classes.
+Offline helm template / client-side dry-run returns an empty dict instead, so
+skip validation only in that case. API errors (including forbidden) propagate.
+The Helm caller needs StorageClass list permission; opt out explicitly for
+restricted callers or manually bound chart-managed claims. This only checks
+default-class selection, not provisioner health or available PV capacity.
+*/ -}}
+{{- $classes := lookup "storage.k8s.io/v1" "StorageClass" "" "" }}
+{{- if hasKey $classes "items" }}
+{{- include "llmkube.modelCache.requireDefaultStorageClass" $classes }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
