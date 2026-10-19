@@ -480,8 +480,9 @@ modelCache:
   # Fail a live install/upgrade if shared caching needs the cluster default
   # StorageClass and none exists. Offline rendering skips the lookup check; an
   # already Bound chart-managed claim also skips it on upgrade. The Helm caller
-  # needs StorageClass list permission. Set false for unbound manually bound
-  # chart-managed claims or restricted callers, and verify binding yourself.
+  # needs StorageClass list permission. Set false for the first install of a
+  # manually bound chart-managed claim (before it is Bound) or for restricted
+  # callers, and verify binding yourself.
   requireDefaultStorageClass: true
   # Access mode for the shared cache PVC (only used when mode=shared):
   # ReadWriteOnce (single-node) or ReadWriteMany (multi-node with NFS/EFS).

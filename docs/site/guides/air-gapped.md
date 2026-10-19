@@ -185,9 +185,10 @@ an existing claim, the chart checks for a default StorageClass and fails
 with these three remedies if none exists. Offline `helm template` and
 client-side dry runs skip this check because `lookup` has no API response;
 use `--dry-run=server` to exercise it against a cluster. The Helm caller
-needs permission to list StorageClasses. For a deliberately statically
-bound chart-managed claim, an already Bound chart-managed PVC skips the check
-on upgrade. A Pending claim is still checked. For a caller without that permission, set
+needs permission to list StorageClasses. A chart-managed claim that is
+already Bound skips the check on upgrade; a Pending one is still checked.
+For the first install of a statically bound chart-managed claim, or a
+caller without permission to list StorageClasses, set
 `modelCache.requireDefaultStorageClass: false` and verify binding yourself.
 The preflight checks the default annotation, not provisioner health or PV
 capacity, and does not validate claims supplied through `existingClaim`.
