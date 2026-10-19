@@ -172,6 +172,10 @@ workload's namespace. To use a custom cache for downloaded weights, set
 `spec.modelCache.claimName` on the InferenceService; `pvc://` Models keep
 using the claim named in their source URL.
 
+`llmkube cache list` discovers the shared operator cache by the conventional
+`llmkube-model-cache` PVC name. If `existingClaim` names a differently named
+PVC, that operator scratch cache will not appear in the list.
+
 If dynamic provisioning is available but no class is the default, set
 `modelCache.storageClass` to the desired class instead.
 
@@ -182,7 +186,8 @@ with these three remedies if none exists. Offline `helm template` and
 client-side dry runs skip this check because `lookup` has no API response;
 use `--dry-run=server` to exercise it against a cluster. The Helm caller
 needs permission to list StorageClasses. For a deliberately statically
-bound chart-managed claim, or a caller without that permission, set
+bound chart-managed claim, an already Bound chart-managed PVC skips the check
+on upgrade. A Pending claim is still checked. For a caller without that permission, set
 `modelCache.requireDefaultStorageClass: false` and verify binding yourself.
 The preflight checks the default annotation, not provisioner health or PV
 capacity, and does not validate claims supplied through `existingClaim`.

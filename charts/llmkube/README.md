@@ -358,9 +358,14 @@ For pre-staged `pvc://` Models without dynamic provisioning, use
 and the chart creates no shared PVC. Downloaded models still need storage
 for their per-service caches.
 
+The `llmkube cache list` command discovers the shared operator cache by its
+conventional `llmkube-model-cache` PVC name. If `existingClaim` names a
+different PVC, that operator scratch cache will not appear in the list.
+
 `modelCache.requireDefaultStorageClass` defaults to `true`. Live installs
 and upgrades check for a default StorageClass when shared caching is enabled
-and neither `storageClass` nor `existingClaim` is set. Offline rendering
+and neither `storageClass` nor `existingClaim` is set, unless the chart-managed
+cache PVC is already Bound. Offline rendering
 skips this check; `--dry-run=server` exercises it. The Helm caller needs
 StorageClass list permission. Set the toggle to `false` for manually bound
 chart-managed claims or restricted Helm callers, and verify binding yourself.

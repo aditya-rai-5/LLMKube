@@ -11,12 +11,17 @@ A live list response has an items key even when the cluster has no classes.
 Offline helm template / client-side dry-run returns an empty dict instead, so
 skip validation only in that case. API errors (including forbidden) propagate.
 The Helm caller needs StorageClass list permission; opt out explicitly for
-restricted callers or manually bound chart-managed claims. This only checks
-default-class selection, not provisioner health or available PV capacity.
+restricted callers or manually bound chart-managed claims. An already Bound
+chart-managed claim skips this check on upgrade. This only checks default-class
+selection, not provisioner health or available PV capacity.
 */ -}}
+{{- $claimName := printf "%s-model-cache" (include "llmkube.fullname" .) }}
+{{- $existing := lookup "v1" "PersistentVolumeClaim" (include "llmkube.namespace" .) $claimName }}
+{{- if ne (dig "status" "phase" "" $existing) "Bound" }}
 {{- $classes := lookup "storage.k8s.io/v1" "StorageClass" "" "" }}
 {{- if hasKey $classes "items" }}
 {{- include "llmkube.modelCache.requireDefaultStorageClass" $classes }}
+{{- end }}
 {{- end }}
 {{- end }}
 apiVersion: v1

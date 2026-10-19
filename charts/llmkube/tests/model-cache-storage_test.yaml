@@ -7,6 +7,11 @@ templates:
 # helm-unittest's dynamic fake cannot LIST a kind with no registered objects.
 kubernetesProvider:
   scheme:
+    "v1/PersistentVolumeClaim":
+      gvr:
+        version: v1
+        resource: persistentvolumeclaims
+      namespaced: true
     "storage.k8s.io/v1/StorageClass":
       gvr:
         group: storage.k8s.io
@@ -20,6 +25,52 @@ kubernetesProvider:
         name: available-but-not-default
       provisioner: example.com/storage
 tests:
+  - it: skips the default-class preflight for an already Bound chart claim on upgrade
+    template: model-cache-pvc.yaml
+    release:
+      upgrade: true
+    kubernetesProvider:
+      objects:
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: RELEASE-NAME-llmkube-model-cache
+            namespace: NAMESPACE
+          spec:
+            storageClassName: ""
+            volumeName: manually-provisioned-cache
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 100Gi
+          status:
+            phase: Bound
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-llmkube-model-cache
+
+  - it: rejects an existing chart claim that is still Pending on upgrade without a default class
+    template: model-cache-pvc.yaml
+    release:
+      upgrade: true
+    kubernetesProvider:
+      objects:
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: RELEASE-NAME-llmkube-model-cache
+            namespace: NAMESPACE
+          status:
+            phase: Pending
+    asserts:
+      - failedTemplate:
+          errorMessage: "LLMKube shared model cache requires a default StorageClass: none was found. Set modelCache.storageClass, set modelCache.existingClaim to a pre-provisioned PVC in the operator namespace, or use modelCache.mode=perService."
+
+
   # Removing the helper's failure must make this assertion fail. The lookup
   # call itself is exercised by the non-default-class cases below.
   - it: fails with all three remedies when the cluster has no StorageClasses
