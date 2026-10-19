@@ -660,6 +660,7 @@ func (r *InferenceServiceReconciler) constructDeployment(
 		},
 	}
 	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, isvc.Spec.ExtraVolumes...)
+	configureSGLangAPIKey(deployment, isvc)
 	if shmVolume != nil {
 		deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, *shmVolume)
 	}

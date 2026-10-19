@@ -121,13 +121,24 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8000/v1/chat/c
 
 How LLMKube wires the key:
 
-- vLLM reads it from the `VLLM_API_KEY` environment variable. SGLang gets it as
-  `LLMKUBE_API_KEY` plus the arguments `--api-key $(LLMKUBE_API_KEY)`, which
-  Kubernetes expands at container start. The key itself never appears in the
-  pod spec. Once SGLang is running, though, the expanded key is on its
-  command line, so it shows in the node's process list, and SGLang 0.5.19
-  prints it among its server arguments in the startup log. Restrict who can
-  read the pod's logs as you would the Secret.
+- vLLM reads it from the `VLLM_API_KEY` environment variable. SGLang's launcher
+  writes `LLMKUBE_API_KEY` to a private config file on a memory-backed volume,
+  removes the variable from the server's environment, and starts SGLang with
+  `--config /run/llmkube-endpoint-key/config.yaml`. The file is readable only
+  by the serving user; no other container mounts the volume. The key itself
+  appears in neither the pod spec nor the OS process arguments. An existing
+  `--config` in `extraArgs` is merged, with this Secret supplying `api-key`
+  and explicit CLI flags retaining precedence. Images must support SGLang's
+  YAML `--config` option (checked in the pinned v0.5.15.post1 and v0.5.22).
+  **The startup log remains sensitive:** SGLang 0.5.19 prints the parsed
+  `api_key` among its server arguments even when loaded from a config file.
+  Treat pod logs and downstream copies (Loki, SIEM, backups) as credentials.
+  Upstream must redact both `api_key` and `admin_api_key` to close that
+  exposure; remaining work is tracked in
+  [LLMKube #2054](https://github.com/defilantech/LLMKube/issues/2054).
+  vLLM does not have this command-line/log exposure. After upgrading LLMKube,
+  keyed SGLang pods restart to adopt the config-file launch path; rotate keys
+  previously passed on the command line or shipped to log storage.
 - Both runtimes leave `/health` and `/metrics` open, so the pod's probes and
   Prometheus scraping keep working without the key. The lab run checked this
   on vLLM and on SGLang 0.5.19 (`lmsysorg/sglang:v0.5.19-cu130-runtime`,
@@ -1140,9 +1151,10 @@ LLMKube:
 - `apiKeySecretRef` is supported for runtime `vllm` and `sglang` only;
   admission rejects it on other runtimes.
 - SGLang with `spec.command` set and a key is rejected, because LLMKube cannot
-  add `--api-key` to a command line it does not build. Drop `spec.command`, or
-  remove `apiKeySecretRef` and pass `--api-key $(VAR)` in `spec.args`, with
-  `VAR` set from the Secret in `spec.env`.
+  install its config-file launcher around a custom command. Drop
+  `spec.command`, or remove `apiKeySecretRef` and configure authentication in
+  your custom command. Passing the key as `--api-key $(VAR)` in `spec.args`
+  exposes it in the OS process arguments as well as the startup log.
 - `apiKeySecretRef` cannot be combined with `spec.endpoint.gateway.enabled`;
   admission rejects it. The Envoy AI Gateway resources LLMKube generates do
   not forward the key, so every request through the gateway would get 401.

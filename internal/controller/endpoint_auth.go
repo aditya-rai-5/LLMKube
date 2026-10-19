@@ -26,7 +26,7 @@ import (
 
 // Env var names the runtimes read the endpoint API key from. vLLM reads
 // VLLM_API_KEY itself (v0.25.1 and v0.31.0: args.api_key or envs.VLLM_API_KEY);
-// SGLang only takes --api-key, so it gets an env var the args expand.
+// SGLang's launcher transfers LLMKUBE_API_KEY into a private config file.
 const (
 	vllmAPIKeyEnv   = "VLLM_API_KEY"    //nolint:gosec // G101: env var name, not a credential value
 	sglangAPIKeyEnv = "LLMKUBE_API_KEY" //nolint:gosec // G101: env var name, not a credential value

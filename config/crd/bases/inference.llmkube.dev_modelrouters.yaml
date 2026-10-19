@@ -367,7 +367,12 @@ spec:
                     description: |-
                       APIKeySecretRef names a Secret key holding the API key callers must
                       present as "Authorization: Bearer <key>". vLLM reads it as VLLM_API_KEY;
-                      SGLang gets it as LLMKUBE_API_KEY plus "--api-key $(LLMKUBE_API_KEY)".
+                      SGLang's launcher writes LLMKUBE_API_KEY to a private, memory-backed
+                      config file and unsets the variable before starting SGLang. The key stays
+                      out of the pod spec and OS process arguments, but SGLang may still print
+                      api_key in its startup log (verified on v0.5.19). Treat pod logs and any
+                      downstream log storage as credentials until upstream redacts api_key
+                      and admin_api_key. vLLM does not have this command-line/log exposure.
                       Both runtimes leave /health and /metrics open, so probes keep working.
                       Supported for runtime vllm and sglang. A key change takes effect when the
                       pods restart. An --api-key already in extraArgs wins; LLMKube then adds

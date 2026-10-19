@@ -79,14 +79,20 @@ func TestEndpointAPIKeyVLLMEnv(t *testing.T) {
 	}
 }
 
-func TestEndpointAPIKeySGLangEnvAndArg(t *testing.T) {
+func TestEndpointAPIKeySGLangConfigArgs(t *testing.T) {
 	c := renderContainer(t, keyedISvc(RuntimeSGLANG))
-	if got := envNamed(c, "LLMKUBE_API_KEY"); len(got) != 1 || got[0].ValueFrom.SecretKeyRef.Name != "upstream-key" {
+	if got := envNamed(c, "LLMKUBE_API_KEY"); len(got) != 1 || got[0].Value != "" ||
+		got[0].ValueFrom == nil || got[0].ValueFrom.SecretKeyRef == nil || got[0].ValueFrom.SecretKeyRef.Name != "upstream-key" {
 		t.Fatalf("LLMKUBE_API_KEY = %+v, want one secretKeyRef to upstream-key", got)
 	}
-	i := slices.Index(c.Args, "--api-key")
-	if i < 0 || i+1 >= len(c.Args) || c.Args[i+1] != "$(LLMKUBE_API_KEY)" {
-		t.Fatalf("args = %v, want --api-key $(LLMKUBE_API_KEY)", c.Args)
+	if slices.ContainsFunc(c.Args, func(a string) bool {
+		return strings.Contains(a, "api-key") || strings.Contains(a, "$(LLMKUBE_API_KEY)")
+	}) {
+		t.Fatalf("SGLang args expose the API key through a flag: %v", c.Args)
+	}
+	i := slices.Index(c.Args, "--config")
+	if i < 0 || i+1 >= len(c.Args) {
+		t.Fatalf("args = %v, want --config and a file path", c.Args)
 	}
 }
 
@@ -106,6 +112,9 @@ func TestEndpointAPIKeyUserFlagWins(t *testing.T) {
 			}
 			if n != 1 {
 				t.Errorf("%s %v: %d --api-key flags in %v, want only the user's", rt, extra, n, c.Args)
+			}
+			if slices.Contains(c.Command, sglangAPIKeyLauncher) {
+				t.Errorf("%s %v: Secret config launcher overrides the user's API-key flag", rt, extra)
 			}
 		}
 	}

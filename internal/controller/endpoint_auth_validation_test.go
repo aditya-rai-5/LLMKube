@@ -68,8 +68,8 @@ var _ = Describe("InferenceService endpoint auth CRD validation", func() {
 	It("rejects apiKeySecretRef with spec.command on sglang", func() {
 		isvc := newISvc("sglang", &inferencev1alpha1.EndpointSpec{APIKeySecretRef: keyRef})
 		isvc.Spec.Command = []string{"python3", "-m", "sglang.launch_server"}
-		reject(isvc, "LLMKube cannot add --api-key to the SGLang command line; "+
-			"drop spec.command, or remove endpoint.apiKeySecretRef and pass --api-key $(VAR) in spec.args")
+		reject(isvc, "LLMKube cannot configure SGLang endpoint authentication; "+
+			"drop spec.command, or remove endpoint.apiKeySecretRef and configure authentication in your custom command")
 	})
 	It("admits apiKeySecretRef with spec.command on vllm (the key travels as env)", func() {
 		isvc := newISvc("vllm", &inferencev1alpha1.EndpointSpec{APIKeySecretRef: keyRef})
