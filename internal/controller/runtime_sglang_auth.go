@@ -74,7 +74,7 @@ config.pop("api_key", None)
 config["api-key"] = key
 os.umask(0o077)
 with open(path, "w") as target:
-    json.dump(config, target)
+    json.dump(config, target, default=str)
 os.execv(sys.executable, [sys.executable, "-m", "sglang.launch_server", "--config", path] + remaining)
 `
 

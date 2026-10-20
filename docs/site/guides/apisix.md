@@ -125,7 +125,9 @@ How LLMKube wires the key:
   writes `LLMKUBE_API_KEY` to a private config file on a memory-backed volume,
   removes the variable from the server's environment, and starts SGLang with
   `--config /run/llmkube-endpoint-key/config.yaml`. The file is readable only
-  by the serving user; no other container mounts the volume. The key itself
+  by the serving user; no other container mounts the volume. The variable
+  remains in the container spec as a Secret reference, so `kubectl exec`
+  sessions still receive `LLMKUBE_API_KEY`. The key itself
   appears in neither the pod spec nor the OS process arguments. An existing
   `--config` in `extraArgs` is merged, with this Secret supplying `api-key`
   and explicit CLI flags retaining precedence. Images must support SGLang's

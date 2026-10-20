@@ -1037,8 +1037,9 @@ type EndpointSpec struct {
 	// APIKeySecretRef names a Secret key holding the API key callers must
 	// present as "Authorization: Bearer <key>". vLLM reads it as VLLM_API_KEY;
 	// SGLang's launcher writes LLMKUBE_API_KEY to a private, memory-backed
-	// config file and unsets the variable before starting SGLang. The key stays
-	// out of the pod spec and OS process arguments, but SGLang may still print
+	// config file and unsets the variable before starting SGLang. kubectl exec
+	// sessions still receive LLMKUBE_API_KEY from the container's Secret reference.
+	// The key stays out of the pod spec and OS process arguments, but SGLang may still print
 	// api_key in its startup log (verified on v0.5.19). Treat pod logs and any
 	// downstream log storage as credentials until upstream redacts api_key
 	// and admin_api_key. vLLM does not have this command-line/log exposure.

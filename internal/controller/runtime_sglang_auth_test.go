@@ -110,7 +110,7 @@ print(json.dumps({"args": sys.argv, "env": os.environ.get("LLMKUBE_API_KEY"), "c
 			}
 			if tc.config {
 				userPath := filepath.Join(dir, "user.yaml")
-				if err := os.WriteFile(userPath, []byte("api_key: old-key\ncontext-length: 8192\n"), 0o600); err != nil {
+				if err := os.WriteFile(userPath, []byte("api_key: old-key\ncontext-length: 8192\nrevision: 2024-05-01\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				args = append(args, "--config", userPath)
@@ -148,6 +148,9 @@ print(json.dumps({"args": sys.argv, "env": os.environ.get("LLMKUBE_API_KEY"), "c
 			}
 			if tc.config && (got.Config["context-length"] != float64(8192) || got.Config["api_key"] != nil) {
 				t.Fatal("user config was not preserved with the Secret taking precedence")
+			}
+			if tc.config && got.Config["revision"] != "2024-05-01" {
+				t.Fatal("YAML date revision was not preserved as SGLang's string value")
 			}
 		})
 	}
