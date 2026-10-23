@@ -681,8 +681,8 @@ const sha256VerifyFns = sha256HashFns + `llmkube_atomic_write() { _llmkube_tmp=$
 //
 // A file with no digest in $MODEL_FILE_SHA256 gets an empty MODEL_SHA256, and
 // llmkube_accept_file / llmkube_publish_file fall back to existence and a plain
-// rename, so a partially pinned staging set stages the unpinned files exactly
-// as before. $MODEL_FILE_SHA256 is newline-delimited "<digest> <repo-relative
+// rename; the caller applies the origin-size check for unpinned cache hits.
+// $MODEL_FILE_SHA256 is newline-delimited "<digest> <repo-relative
 // path>"; the digest comes first so a path containing spaces survives the
 // read. A command built with these gates aborts when MODEL_FILE_SHA256 did not
 // reach the container, matching the single-file precheck's fail-closed rule.
@@ -1145,7 +1145,14 @@ func multiFileInitEnvVars(source, cacheDir string, files []string, digests map[s
 // MODEL_PATH and MODEL_SOURCE per file for those helpers; the loop runs in a
 // pipeline subshell, so the assignments do not leak.
 func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refreshPolicy string) string {
-	prefix := `mkdir -p "$CACHE_DIR" || exit 1; ` + cacheDirLock
+	// FUSE mounts cannot establish the cross-node lock contract. Serving
+	// pods must use prefetch; only its single staging Job may bypass flock.
+	// Use Linux FUSE_SUPER_MAGIC: BusyBox stat reports its name as UNKNOWN.
+	prefix := `mkdir -p "$CACHE_DIR" || exit 1; ` +
+		`cache_fs=$(stat -f -c %t "$CACHE_DIR") || { echo "ERROR: cannot determine cache filesystem" >&2; exit 1; }; ` +
+		`case "$cache_fs" in 65735546) ` +
+		`[ "${LLMKUBE_PREFETCH_STAGER:-false}" = true ] || { echo "ERROR: FUSE cache cannot guarantee cross-node file locking; set spec.modelCache.prefetch: true on every InferenceService using this claim" >&2; exit 1; };; ` +
+		`*) ` + cacheDirLock + `;; esac; `
 	sweep := `find "$CACHE_DIR" -name '*.tmp' -delete`
 	if !useCache {
 		prefix = `mkdir -p /models && `
@@ -1160,16 +1167,13 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 
 	normalizeFn := `normalize_hf_source() { case "$1" in hf://*) src="${1#hf://}"; rev="${src#*@}"; if [ "$rev" != "$src" ]; then echo "https://huggingface.co/${src%%@*}/resolve/$rev/"; else echo "https://huggingface.co/$src/resolve/main/"; fi ;; *) echo "$1" ;; esac; }` + " && "
 
-	// Per-file verify gates (#1978). Every fragment below is empty when
-	// withSHA256 is false, so the unhashed command stays byte-for-byte what it
-	// was before this change (pinned by the initcmd_multi_* goldens).
+	// Per-file verify gates (#1978) are omitted when withSHA256 is false.
 	fns := ""
 	pre := ""
 	digestAssign := ""
 	markerGuard := ""
 	sizeHit := ""
-	keepCachedTail := `elif [ -f "$dest" ]; then echo "Revalidation unreachable for $rel; kept cached copy"; ` +
-		`else echo "ERROR: model artifact $rel missing and revalidation failed"; exit 1; fi; `
+	keepCachedTail := `else echo "ERROR: model artifact $rel could not be validated or downloaded"; exit 1; fi; `
 	if withSHA256 {
 		fns = sha256VerifyFns + sha256MultiFileFns
 		pre = `llmkube_precheck_file_sha256 || exit 1; `
@@ -1180,24 +1184,38 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 		// cached copy only if it still passes the gate (stamp hit or a local
 		// hash match), otherwise fail the init. Mirrors remoteRevalidateScript's
 		// keepCached, so an Offline restart cannot serve bytes that fail the
-		// pin. The unhashed shape above stays byte-for-byte unchanged.
-		keepCachedTail = `elif [ -f "$dest" ] && llmkube_accept_file "$dest"; then if llmkube_marker_hit_sha256 "$dest"; then echo "Model artifact $rel: the origin served bytes that do not match the pinned spec.fileSha256; kept the pinned cached copy"; else echo "Revalidation unreachable for $rel; kept cached copy"; fi; ` +
+		// pin. Unpinned files have no verified offline fallback.
+		keepCachedTail = `elif [ -n "${MODEL_SHA256:-}" ] && [ -f "$dest" ] && llmkube_accept_file "$dest"; then if llmkube_marker_hit_sha256 "$dest"; then echo "Model artifact $rel: the origin served bytes that do not match the pinned spec.fileSha256; kept the pinned cached copy"; else echo "Revalidation unreachable for $rel; kept cached copy"; fi; ` +
 			`else echo "ERROR: model artifact $rel missing and revalidation failed"; exit 1; fi; `
 	}
 	publishFile := func(partial string) string {
+		publish := `mv "` + partial + `" "$dest"`
 		if withSHA256 {
-			return `llmkube_publish_file "` + partial + `" "$dest"`
+			publish = `llmkube_publish_file "` + partial + `" "$dest"`
 		}
-		return `mv "` + partial + `" "$dest"`
+		// Object-backed filesystems may implement rename as copy/delete. Check
+		// the published file too, before a prefetch Job can report success.
+		return `{ published_size=$(stat -c %s "` + partial + `") && ` + publish + ` && ` +
+			`{ [ "$(stat -c %s "$dest")" = "$published_size" ] || { ` +
+			`rm -f "$dest.sha256"; echo "ERROR: published artifact $rel has the wrong size" >&2; false; }; }; }`
 	}
-	// downloadOrCached emits the IfNotPresent download-or-skip block. The
-	// unhashed shape keeps the historical `[ ! -f ]` test byte for byte; the
-	// hashed shape inverts it so a missing or stale stamp downloads.
+	// IfNotPresent must not keep a truncated unpinned file merely because it
+	// exists. Use the same authenticated origin as the download; pinned files
+	// retain their local checksum gate, including offline cache hits.
+	sizeCurl := curlCmd(isHFAuth)
+	if isS3 {
+		sizeCurl = "s3_curl"
+	}
+	sizeCheck := `llmkube_cached_size_matches() { ` +
+		`_llmkube_size=$(` + sizeCurl + ` -fsSL -I "$url" -o /dev/null -w '%header{content-length}' 2>/dev/null) || _llmkube_size=; ` +
+		`case "$_llmkube_size" in ''|*[!0-9]*) echo "WARNING: origin size unavailable for $rel; downloading a fresh copy" >&2; return 1;; esac; ` +
+		`[ "$(stat -c %s "$dest" 2>/dev/null)" = "$_llmkube_size" ]; }; `
 	downloadOrCached := func(download, cachedEcho string) string {
+		accept := `llmkube_cached_size_matches`
 		if withSHA256 {
-			return `if [ -f "$dest" ] && llmkube_accept_file "$dest"; then ` + cachedEcho + `; else ` + download + `fi; `
+			accept = `{ if [ -n "${MODEL_SHA256:-}" ]; then llmkube_accept_file "$dest"; else llmkube_cached_size_matches; fi; }`
 		}
-		return `if [ ! -f "$dest" ]; then ` + download + `else ` + cachedEcho + `; fi; `
+		return sizeCheck + `if [ -f "$dest" ] && ` + accept + `; then ` + cachedEcho + `; else ` + download + `fi; `
 	}
 
 	if isS3 {
@@ -1586,6 +1604,9 @@ func buildCachedStorageConfig(model *inferencev1alpha1.Model, isvc *inferencev1a
 		base := stagingRepoBase(model.Spec.Source, hfEndpoint)
 		cmd := buildMultiFileInitCommand(true, isS3Source(model.Spec.Source), isHFAuthSourceForEndpoint(base, hfEndpoint), len(model.Spec.FileSHA256) > 0, model.Spec.RefreshPolicy)
 		env := multiFileInitEnvVars(base, cacheDir, plan.Files, model.Spec.FileSHA256)
+		// Explicit Env wins over EnvFrom, so source credentials cannot enable
+		// the prefetch-only FUSE bypass in a serving pod.
+		env = append(env, corev1.EnvVar{Name: "LLMKUBE_PREFETCH_STAGER", Value: "false"})
 
 		initVolumeMounts := []corev1.VolumeMount{
 			{Name: "model-cache", MountPath: "/models"},

@@ -86,6 +86,44 @@ Cache Key: a3b8c9d4e5f67890
 Path: /models/a3b8c9d4e5f67890/model.gguf
 ```
 
+## Multi-file cache validation and shared volumes
+
+For multi-file downloads using `IfNotPresent`, an unpinned cached file is
+checked against the origin's HTTP `Content-Length` before it is reused. A
+size mismatch triggers a fresh staging attempt; a failed download fails the
+init container instead of accepting the mismatched file. This also applies
+to unpinned files in a partially pinned `spec.fileSha256` manifest.
+
+If the origin is unreachable or does not provide a valid size, the downloader
+attempts a fresh download instead of accepting an unverified cached file. If
+that download fails, initialization fails. `OnChange` also refuses to fall
+back to an unpinned cached file after a failed refresh. Checksum-pinned files
+can still be verified locally for offline restarts. Size checks cannot detect
+corruption of the same length; use `spec.fileSha256` for content verification.
+The downloader checks the size again after publishing, so a successful move
+that leaves a truncated destination cannot mark staging successful.
+
+Concurrent staging requires filesystem locks that work across writer nodes.
+`ReadWriteMany` alone does not guarantee this. BlobFuse lists `flock` as an
+[unsupported operation](https://learn.microsoft.com/en-us/azure/storage/blobs/blobfuse2-known-issues).
+The downloader conservatively rejects cached multi-file staging on FUSE
+mounts (`fuse` or `fuseblk`) in serving pods. It also fails if it cannot
+identify the cache filesystem, before sweeping or downloading any files.
+This applies to all FUSE mounts because the filesystem type alone cannot
+establish whether a specific implementation supports cross-node locking.
+
+Set `spec.modelCache.prefetch: true` on every InferenceService using such a
+claim. The operator's prefetch Job is allowed to stage on FUSE without
+relying on `flock`. It waits for a failed pod before creating a replacement,
+so a terminating writer is not overlapped by its retry. Operator-driven Job
+replacement also waits for the old Job's pods to be deleted. Serving pods wait for
+successful staging into their claim, then mount the cache read-only. See
+[Letting the service require a prefetch](#letting-the-service-require-a-prefetch).
+Avoid other writers (including separate Models sharing the same cache key)
+to that cache directory while the Job stages it. Other filesystems still use
+`flock`; their cross-node lock semantics must be supported by the storage
+provider.
+
 ## Integrity Verification (spec.sha256)
 
 Setting `spec.sha256` on a `Model` makes the download init container verify the
