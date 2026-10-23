@@ -243,6 +243,13 @@ func TestModelDownloadLock_ReadOnlyWarmCache(t *testing.T) {
 		{"multi-file", buildMultiFileInitCommand(true, false, false, false, RefreshPolicyIfNotPresent), "model.gguf"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodHead {
+					t.Error("warm cache downloaded unexpectedly")
+				}
+				w.Header().Set("Content-Length", "6")
+			}))
+			defer origin.Close()
 			dir := t.TempDir()
 			modelPath := filepath.Join(dir, "model.gguf")
 			if err := os.WriteFile(modelPath, []byte("cached"), 0o444); err != nil {
@@ -254,7 +261,7 @@ func TestModelDownloadLock_ReadOnlyWarmCache(t *testing.T) {
 			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restored so TempDir cleanup can delete it
 			cmd := exec.Command("sh", "-c", tc.script)
 			cmd.Env = append(os.Environ(),
-				"MODEL_SOURCE=http://127.0.0.1:1/model.gguf", "MODEL_PATH="+modelPath, "CACHE_DIR="+dir,
+				"MODEL_SOURCE="+origin.URL+"/model.gguf", "MODEL_PATH="+modelPath, "CACHE_DIR="+dir,
 				"MODEL_FILES="+tc.files)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
