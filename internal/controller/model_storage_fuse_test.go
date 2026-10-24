@@ -18,16 +18,23 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	inferencev1alpha1 "github.com/defilantech/llmkube/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestMultiFileFUSEStaging(t *testing.T) {
@@ -133,5 +140,109 @@ func TestMultiFileFUSEStaging(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestMultiFileFUSEWarmCache(t *testing.T) {
+	requireInitShellEnvironment(t)
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, policy := range []string{RefreshPolicyIfNotPresent, RefreshPolicyOnChange} {
+		for _, s3 := range []bool{false, true} {
+			for _, state := range []string{"offline", "matching", "missing", "truncated"} {
+				t.Run(fmt.Sprintf("%s/s3-%v/%s", policy, s3, state), func(t *testing.T) {
+					var gets atomic.Int32
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method != http.MethodHead {
+							gets.Add(1)
+						}
+						w.Header().Set("Content-Length", "6")
+					}))
+					t.Cleanup(srv.Close)
+					if state == "offline" {
+						srv.Close()
+					}
+					dir := t.TempDir()
+					bin := t.TempDir()
+					stub := "#!/bin/sh\nif [ \"$1\" = -f ]; then echo 65735546; else exec \"$REAL_STAT\" \"$@\"; fi\n"
+					if err := os.WriteFile(filepath.Join(bin, "stat"), []byte(stub), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					cached := "cached"
+					if state == "truncated" {
+						cached = "short"
+					}
+					dest := filepath.Join(dir, "model.safetensors")
+					if state != "missing" {
+						if err := os.WriteFile(dest, []byte(cached), 0o444); err != nil {
+							t.Fatal(err)
+						}
+					}
+					sentinel := filepath.Join(dir, "orphan.tmp")
+					if err := os.WriteFile(sentinel, []byte("untouched"), 0o444); err != nil {
+						t.Fatal(err)
+					}
+					env := []string{"MODEL_FILES=model.safetensors", "PATH=" + bin + ":" + os.Getenv("PATH"), "REAL_STAT=" + realStat}
+					if s3 {
+						env = append(env, s3TestEnv(srv.URL)...)
+					}
+					out, err := runVerifyScriptEnv(t, buildMultiFileInitCommand(true, s3, false, false, policy), srv.URL, dest, "", env...)
+					if state == "missing" || state == "truncated" {
+						if err == nil {
+							t.Fatalf("unsafe FUSE staging succeeded: %s", out)
+						}
+						assertCacheLockCondition(t, out)
+						if s3 && (!strings.Contains(out, "s3:// sources do not support prefetch") || strings.Contains(out, "set spec.modelCache.prefetch")) {
+							t.Errorf("S3 staging error gives an unsupported remedy: %s", out)
+						}
+					} else if err != nil {
+						t.Fatalf("warm FUSE cache failed: %v\n%s", err, out)
+					}
+					if gets.Load() != 0 {
+						t.Errorf("serving pod attempted %d downloads on FUSE", gets.Load())
+					}
+					if state != "missing" && readOrFail(t, dest) != cached {
+						t.Error("serving pod modified the FUSE cache")
+					}
+					if readOrFail(t, sentinel) != "untouched" {
+						t.Error("serving pod swept the FUSE cache")
+					}
+					if _, err := os.Stat(filepath.Join(dir, ".llmkube-download.lock")); !os.IsNotExist(err) {
+						t.Error("serving pod created a lock file on FUSE")
+					}
+					if _, err := os.Stat(dest + ".llmkube-size"); !os.IsNotExist(err) {
+						t.Error("serving pod wrote a size record on FUSE")
+					}
+				})
+			}
+		}
+	}
+}
+
+// Feed the downloader's actual failure into the same condition path that
+// handles an init container's termination message on a serving pod.
+func assertCacheLockCondition(t *testing.T, output string) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	isvc := &inferencev1alpha1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "default"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", Labels: map[string]string{"app": isvc.Name, "inference.llmkube.dev/service": isvc.Name}},
+		Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+			Name: "model-downloader", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: output}},
+		}}},
+	}
+	r := &InferenceServiceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()}
+	r.reconcileModelTransferCondition(t.Context(), isvc)
+	condition := meta.FindStatusCondition(isvc.Status.Conditions, ConditionModelTransferHealthy)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "ModelCacheLockUnsupported" {
+		t.Fatalf("FUSE staging failure has no actionable condition: %+v", condition)
+	}
+	if !strings.Contains(condition.Message, "pvc://") {
+		t.Errorf("cache-lock condition lacks a pre-staging remedy: %s", condition.Message)
 	}
 }
