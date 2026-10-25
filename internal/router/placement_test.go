@@ -19,11 +19,13 @@ package router
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,8 +114,8 @@ func TestPlaceSessionMigratesOffQuarantinedPodAndStays(t *testing.T) {
 	home, _, _, _ := d.place(b, h, 0)
 	quarantineEndpoint(d, "qwen", home)
 	ep, res, reason, _ := d.place(b, h, 0)
-	if ep == home || ep == "" || res != picker.Migrated || reason != picker.ReasonNotReady {
-		t.Fatalf("quarantined pod: place = %s/%s/%q, want another pod, migrated, not_ready", ep, res, reason)
+	if ep == home || ep == "" || res != picker.Migrated || reason != picker.ReasonQuarantined {
+		t.Fatalf("quarantined pod: place = %s/%s/%q, want another pod, migrated, quarantined", ep, res, reason)
 	}
 	// The quarantine expires inside the idle timeout; the session stays on
 	// its new pod rather than returning to the old one.
@@ -271,12 +273,12 @@ func TestPlacementReasonLabel(t *testing.T) {
 	if ep != home || counter("sticky", "") != stickyBefore+1 {
 		t.Errorf("sticky placement: counter {sticky,\"\"} = %v, want %v", counter("sticky", ""), stickyBefore+1)
 	}
-	migratedBefore := counter("migrated", "not_ready")
+	migratedBefore := counter("migrated", "quarantined")
 	quarantineEndpoint(d, "qwen", home)
 	_, res, reason, _ = d.place(b, h, 0)
 	d.countPlacement("qwen", res, reason)
-	if counter("migrated", "not_ready") != migratedBefore+1 {
-		t.Errorf("migration: counter {migrated,not_ready} = %v, want %v", counter("migrated", "not_ready"), migratedBefore+1)
+	if counter("migrated", "quarantined") != migratedBefore+1 {
+		t.Errorf("migration: counter {migrated,quarantined} = %v, want %v", counter("migrated", "quarantined"), migratedBefore+1)
 	}
 }
 
@@ -371,5 +373,92 @@ func TestPlaceHeaderlessAvoidsPodMidColdPrefill(t *testing.T) {
 	ep, res, _, tok := d.place(b, http.Header{}, 4000)
 	if ep != eps[1] || res != picker.LeastLoaded || tok != picker.EstimateTokens(4000) {
 		t.Errorf("place = %s/%s/%d, want %s least_loaded %d", ep, res, tok, eps[1], picker.EstimateTokens(4000))
+	}
+}
+
+func TestDispatchSessionMigrationReason(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		quarantine    bool
+		missingHealth bool
+		remove        bool
+		reason        string
+	}{
+		{name: "quarantined", quarantine: true, reason: "quarantined"},
+		{name: "removed", remove: true, reason: "not_ready"},
+		{name: "missing_health", missingHealth: true, reason: "not_ready"},
+		{name: "quarantined_then_removed", quarantine: true, remove: true, reason: "not_ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fail atomic.Bool
+			home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if fail.Load() {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+				_, _ = io.WriteString(w, "home")
+			}))
+			defer home.Close()
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, "other")
+			}))
+			defer other.Close()
+			now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+			d, b, _ := balancedDispatcher([]string{"x-session-affinity"}, 0,
+				WithRouterLabel(t.Name()), WithNowFunc(func() time.Time { return now }), WithQuarantineDuration(time.Minute))
+			d.SetEndpoints("qwen", []string{home.URL})
+			h := http.Header{"X-Session-Affinity": []string{"agent-1"}}
+			send := func(want string, status int) {
+				t.Helper()
+				resp, err := d.Dispatch(t.Context(), b, http.MethodPost, "/v1/chat/completions", h, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(body) != want || resp.StatusCode != status {
+					t.Fatalf("response = %q/%d, want %q/%d", body, resp.StatusCode, want, status)
+				}
+			}
+			counter := func(result, reason string) float64 {
+				return testutil.ToFloat64(prommetrics.RouterPlacementsTotal.WithLabelValues(t.Name(), "qwen", result, reason))
+			}
+			send("home", http.StatusOK)
+			d.SetEndpoints("qwen", []string{home.URL, other.URL})
+			if tc.quarantine {
+				fail.Store(true)
+				for i := 0; i < endpointFailuresToQuarantine; i++ {
+					send("home", http.StatusInternalServerError)
+				}
+			}
+			if tc.missingHealth {
+				// SetEndpoints deletes health before publishing the new endpoint list.
+				d.health.Delete(healthKey("qwen", home.URL))
+			}
+			if tc.remove {
+				d.SetEndpoints("qwen", []string{other.URL})
+			}
+			quarantinedBefore, notReadyBefore := counter("migrated", "quarantined"), counter("migrated", "not_ready")
+			send("other", http.StatusOK)
+			for reason, before := range map[string]float64{"quarantined": quarantinedBefore, "not_ready": notReadyBefore} {
+				want := before
+				if reason == tc.reason {
+					want++
+				}
+				if got := counter("migrated", reason); got != want {
+					t.Errorf("migration counter {%s} = %v, want %v", reason, got, want)
+				}
+			}
+			fail.Store(false)
+			now = now.Add(2 * time.Minute)
+			d.SetEndpoints("qwen", []string{home.URL, other.URL})
+			stickyBefore := counter("sticky", "")
+			send("other", http.StatusOK)
+			if got := counter("sticky", ""); got != stickyBefore+1 {
+				t.Errorf("sticky counter = %v, want %v", got, stickyBefore+1)
+			}
+		})
 	}
 }

@@ -68,10 +68,11 @@ const (
 type Reason string
 
 const (
-	ReasonNone     Reason = ""
-	ReasonWaiting  Reason = "waiting"
-	ReasonKVFull   Reason = "kv_full"
-	ReasonNotReady Reason = "not_ready"
+	ReasonNone        Reason = ""
+	ReasonWaiting     Reason = "waiting"
+	ReasonKVFull      Reason = "kv_full"
+	ReasonNotReady    Reason = "not_ready"
+	ReasonQuarantined Reason = "quarantined"
 )
 
 const (

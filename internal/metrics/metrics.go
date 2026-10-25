@@ -216,12 +216,12 @@ var (
 
 	// RouterPlacementsTotal counts the router proxy's placement decisions for
 	// balanced backends by result (least_loaded, sticky, spill, fallback or
-	// migrated) and, for a spill or migration, the reason (waiting, kv_full or
-	// not_ready; empty otherwise).
+	// migrated) and, for a spill or migration, the reason (waiting, kv_full,
+	// not_ready or quarantined; empty otherwise).
 	RouterPlacementsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "llmkube_router_placements_total",
-			Help: "Router proxy placement decisions for balanced backends, by result and reason.",
+			Help: "Router proxy placement decisions for balanced backends, by result and reason (waiting, kv_full, not_ready or quarantined; empty otherwise).",
 		},
 		[]string{labelRouter, "backend", "result", "reason"},
 	)

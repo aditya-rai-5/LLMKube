@@ -34,7 +34,7 @@ func bare(ep string, inflight int64) Candidate {
 
 func place(t *testing.T, s *Sessions, key uint64, cands []Candidate, now time.Time, want string, wantRes Result, wantReason Reason) {
 	t.Helper()
-	ep, res, reason, _ := s.Place(key, cands, now, 0, "", 0)
+	ep, res, reason, _ := s.Place(key, cands, now, 0, "", 0, nil)
 	if ep != want || res != wantRes || reason != wantReason {
 		t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)", ep, res, reason, want, wantRes, wantReason)
 	}
@@ -186,7 +186,7 @@ func TestSessionsFullTableFallsBackToRingHome(t *testing.T) {
 	cands := []Candidate{pod("a", 0, 0, 0.1), pod("b", 5, 0, 0.1)}
 	place(t, s, 1, cands, t0, "a", LeastLoaded, ReasonNone)
 	place(t, s, 2, cands, t0, "a", LeastLoaded, ReasonNone)
-	ep, res, reason, _ := s.Place(3, cands, t0, 0, "b", 0)
+	ep, res, reason, _ := s.Place(3, cands, t0, 0, "b", 0, nil)
 	if ep != "b" || res != Fallback || reason != ReasonNone {
 		t.Fatalf("got (%q, %q, %q), want (b, fallback, none)", ep, res, reason)
 	}
@@ -194,7 +194,7 @@ func TestSessionsFullTableFallsBackToRingHome(t *testing.T) {
 		t.Fatalf("Len = %d, want 2", s.Len())
 	}
 	place(t, s, 1, cands, t0, "a", Sticky, ReasonNone)
-	ep, res, _, _ = s.Place(4, cands, t0, 0, "gone", 0)
+	ep, res, _, _ = s.Place(4, cands, t0, 0, "gone", 0, nil)
 	if ep != "a" || res != Fallback {
 		t.Fatalf("got (%q, %q), want (a, fallback)", ep, res)
 	}
@@ -231,7 +231,7 @@ func TestSessionsConcurrentFirstRequestsBindOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			got[i], _, _, _ = s.Place(7, cands, t0, i, "", 0)
+			got[i], _, _, _ = s.Place(7, cands, t0, i, "", 0, nil)
 		}(i)
 	}
 	wg.Wait()
@@ -281,7 +281,7 @@ func TestSessionsFullTableSkipsScanWhenNothingCanExpire(t *testing.T) {
 	c := []Candidate{pod("a", 0, 0, 0.1), pod("b", 5, 0, 0.1)}
 	c[0].Sample.At, c[1].Sample.At = now, now
 	for k := uint64(100); k < 200; k++ {
-		ep, res, _, _ := s.Place(k, c, now, 0, "", 0)
+		ep, res, _, _ := s.Place(k, c, now, 0, "", 0, nil)
 		if ep != "a" || res != Fallback {
 			t.Fatalf("key %d: got (%q, %q), want (a, fallback)", k, ep, res)
 		}
@@ -313,7 +313,7 @@ func TestSessionsFullTableScansWhenSomeExpire(t *testing.T) {
 		t.Fatalf("Len = %d, want 3", s.Len())
 	}
 	// The table is full of live keys again and the oldest bound moved up.
-	ep, res, _, _ := s.Place(5, []Candidate{c}, now, 0, "", 0)
+	ep, res, _, _ := s.Place(5, []Candidate{c}, now, 0, "", 0, nil)
 	if ep != "a" || res != Fallback {
 		t.Fatalf("got (%q, %q), want (a, fallback)", ep, res)
 	}
@@ -359,7 +359,7 @@ func TestSessionsKVFullHerdSelfLimits(t *testing.T) {
 	}
 	moved := 0
 	for k := uint64(1); k <= sessions; k++ {
-		ep, res, _, _ := s.Place(k, cands, t0, 0, "", 0)
+		ep, res, _, _ := s.Place(k, cands, t0, 0, "", 0, nil)
 		if res != Spill {
 			continue
 		}
@@ -419,7 +419,7 @@ func TestSessionsThreePodsGapMoves(t *testing.T) {
 
 func placeTok(t *testing.T, s *Sessions, key uint64, cands []Candidate, now time.Time, body int64) (string, Result, int64) {
 	t.Helper()
-	ep, res, _, tok := s.Place(key, cands, now, 0, "", body)
+	ep, res, _, tok := s.Place(key, cands, now, 0, "", body, nil)
 	return ep, res, tok
 }
 
@@ -437,7 +437,7 @@ func TestSessionsSpillTargetAvoidsPodMidColdPrefill(t *testing.T) {
 	bindToA(t, s, t0)
 	b := pod("b", 2, 0, 0.1)
 	b.Prefill = 140000
-	ep, res, reason, _ := s.Place(1, []Candidate{pod("a", 20, 2, 0.1), b, pod("c", 3, 0, 0.1)}, t0, 0, "", 0)
+	ep, res, reason, _ := s.Place(1, []Candidate{pod("a", 20, 2, 0.1), b, pod("c", 3, 0, 0.1)}, t0, 0, "", 0, nil)
 	if ep != "c" || res != Spill || reason != ReasonWaiting {
 		t.Fatalf("got (%q, %q, %q), want (c, spill, waiting)", ep, res, reason)
 	}
@@ -448,7 +448,7 @@ func TestSessionsMigrationTargetAvoidsPodMidColdPrefill(t *testing.T) {
 	bindToA(t, s, t0)
 	b := pod("b", 2, 0, 0.1)
 	b.Prefill = 140000
-	ep, res, _, _ := s.Place(1, []Candidate{b, pod("c", 3, 0, 0.1)}, t0, 0, "", 0)
+	ep, res, _, _ := s.Place(1, []Candidate{b, pod("c", 3, 0, 0.1)}, t0, 0, "", 0, nil)
 	if ep != "c" || res != Migrated {
 		t.Fatalf("got (%q, %q), want (c, migrated)", ep, res)
 	}
@@ -523,15 +523,37 @@ func TestSessionsTokensPickTheTargetTheKVRuleMeasures(t *testing.T) {
 	bindToA(t, s, t0)
 	x := bare("x", 3)
 	x.Prefill = 100000
-	ep, res, reason, _ := s.Place(1, []Candidate{pod("a", 5, 1, 0.95), x, pod("y", 5, 0, 0.5)}, t0, 0, "", 0)
+	ep, res, reason, _ := s.Place(1, []Candidate{pod("a", 5, 1, 0.95), x, pod("y", 5, 0, 0.5)}, t0, 0, "", 0, nil)
 	if ep != "y" || res != Spill || reason != ReasonKVFull {
 		t.Fatalf("got (%q, %q, %q), want (y, spill, kv_full)", ep, res, reason)
 	}
 	x.Prefill = 0
 	s2 := NewSessions(0, 10)
 	bindToA(t, s2, t0)
-	ep, res, _, _ = s2.Place(1, []Candidate{pod("a", 5, 1, 0.95), x, pod("y", 5, 0, 0.5)}, t0, 0, "", 0)
+	ep, res, _, _ = s2.Place(1, []Candidate{pod("a", 5, 1, 0.95), x, pod("y", 5, 0, 0.5)}, t0, 0, "", 0, nil)
 	if ep != "a" || res != Sticky {
 		t.Fatalf("without tokens: got (%q, %q), want (a, sticky)", ep, res)
+	}
+}
+
+func TestSessionsMigrationReasonUsesBoundEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		quarantined []string
+		reason      Reason
+	}{
+		{name: "bound_pod_quarantined", quarantined: []string{"a"}, reason: ReasonQuarantined},
+		{name: "bound_pod_removed_other_quarantined", quarantined: []string{"c"}, reason: ReasonNotReady},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSessions(0, 10)
+			bindToA(t, s, t0)
+			ep, result, reason, _ := s.Place(1, []Candidate{pod("b", 0, 0, 0.1)}, t0, 0, "", 0, tc.quarantined)
+			if ep != "b" || result != Migrated || reason != tc.reason {
+				t.Fatalf("migration = (%q, %q, %q), want (b, migrated, %q)", ep, result, reason, tc.reason)
+			}
+			// Returning pods do not move the session back to its previous binding.
+			place(t, s, 1, []Candidate{pod("a", 0, 0, 0.1), pod("b", 0, 0, 0.1)}, t0.Add(time.Second), "b", Sticky, ReasonNone)
+		})
 	}
 }

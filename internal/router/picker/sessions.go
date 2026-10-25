@@ -17,6 +17,7 @@ limitations under the License.
 package picker
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -98,12 +99,14 @@ func (s *Sessions) dropExpiredLocked(now time.Time) {
 
 // Place decides which pod serves one request of a session. cands are the
 // dispatchable candidates (quarantined pods already removed, KV-full pods not
-// removed). ringHome is the key's ring home, used only when the table is full.
+// removed). quarantined lists endpoints still in the live set but excluded
+// from cands by quarantine. ringHome is the key's ring home, used only when
+// the table is full.
 // The whole decision runs under the table's lock, so racing first requests for
 // one key bind once. The int64 is the request's estimated uncached prompt
 // tokens: on a sticky turn the growth of the body over the session's previous
 // one, otherwise (or when the body shrank) the whole body.
-func (s *Sessions) Place(key uint64, cands []Candidate, now time.Time, tieStart int, ringHome string, bodyBytes int64) (string, Result, Reason, int64) {
+func (s *Sessions) Place(key uint64, cands []Candidate, now time.Time, tieStart int, ringHome string, bodyBytes int64, quarantined []string) (string, Result, Reason, int64) {
 	if len(cands) == 0 {
 		return "", "", ReasonNone, 0
 	}
@@ -148,7 +151,11 @@ func (s *Sessions) Place(key uint64, cands []Candidate, now time.Time, tieStart 
 	if bound == nil {
 		ep, _ := PickLeastLoaded(Eligible(cands, now), now, tieStart)
 		s.bindings[key] = binding{endpoint: ep, lastSeen: now, movedAt: now, promptBytes: bodyBytes}
-		return ep, Migrated, ReasonNotReady, EstimateTokens(bodyBytes)
+		reason := ReasonNotReady
+		if slices.Contains(quarantined, b.endpoint) {
+			reason = ReasonQuarantined
+		}
+		return ep, Migrated, reason, EstimateTokens(bodyBytes)
 	}
 
 	if least, reason := pressure(*bound, cands, now, tieStart); reason != ReasonNone &&
