@@ -90,23 +90,27 @@ Path: /models/a3b8c9d4e5f67890/model.gguf
 
 For multi-file downloads using `IfNotPresent`, an unpinned cached file is
 checked against its recorded staged size before it is reused. Older entries
-without a size record are checked against the origin's HTTP `Content-Length`. A
-size mismatch triggers a fresh staging attempt; a failed download fails the
-init container instead of accepting the mismatched file. This also applies
-to unpinned files in a partially pinned `spec.fileSha256` manifest.
+without a valid size record are kept without contacting the origin, preserving
+the existing revision even if upstream has changed. Their current local size
+is recorded on a best-effort basis, except on FUSE where serving pods do not
+write to warm caches. This baseline detects subsequent size changes; it cannot
+prove that a legacy file was complete before the upgrade. A mismatch with a
+valid record triggers a fresh staging attempt; a failed download fails the
+init container. This also applies to unpinned files in a partially pinned
+`spec.fileSha256` manifest.
 
-If the origin is unreachable, rate limited, or does not provide a numeric
-size, `IfNotPresent` keeps the cached file with a warning and does not
-re-download it. `OnChange` also keeps a cached file after a failed refresh
-unless an origin size probe, or the recorded staged size when the origin
-size is unavailable, proves it is the wrong size. Checksum-pinned files must
-still pass their local digest check. Size checks cannot detect corruption of
-the same length; use `spec.fileSha256` for content verification.
+After a failed refresh, `OnChange` checks the cached file against its own size
+record, not the current origin size: a different origin size means the cache
+is stale, not corrupt. Without a valid record it keeps the cached copy with a
+warning. A mismatch with a valid local record still fails the init container.
+Checksum-pinned files must still pass their local digest check. Size checks
+cannot detect corruption of the same length; use `spec.fileSha256` for content
+verification.
+
 The downloader checks the size again after publishing and removes the
 destination, checksum stamp, and staged size record if publication left the
-wrong size. A verified publish records its size beside the cached file, so
-`IfNotPresent` warm starts can validate it offline and do not re-pull one shard
-when a mutable origin later changes that shard.
+wrong size. Size records are written using a temporary file and rename so
+concurrent readers cannot observe a partially written number.
 
 `OnChange` still revalidates each file against the current origin. A mutable
 source can therefore change shards independently during a refresh. Pin the

@@ -49,6 +49,11 @@ func runMultiFileCachedSizeCase(t *testing.T, kind, state string) {
 	if err := os.WriteFile(dest, []byte(cached), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if state == "truncated" || state == "oversized" || state == "download-failed" {
+		if err := os.WriteFile(dest+".llmkube-size", []byte(strconv.Itoa(len(content))), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	env := []string{"MODEL_FILES=model.safetensors"}
 	if kind == "hf" {
 		env = append(env, "HF_TOKEN=test-token")
@@ -147,8 +152,8 @@ func assertMultiFileCachedSizeResult(t *testing.T, state, out string, gotGets in
 	if gotGets != wantGets {
 		t.Errorf("GET requests = %d, want %d", gotGets, wantGets)
 	}
-	if (state == "unknown-size" || state == "head-failed" || state == "rate-limited" || state == "offline") && !strings.Contains(out, "keeping cached copy without size validation") {
-		t.Errorf("missing warning for an unavailable origin size: %s", out)
+	if (state == "head-failed" || state == "offline") && !strings.Contains(out, "keeping cached copy without size validation") {
+		t.Errorf("missing warning for an absent size record: %s", out)
 	}
 }
 
@@ -221,6 +226,9 @@ func TestMultiFileOnChangeRejectsMismatchedCache(t *testing.T) {
 				defer srv.Close()
 				dest := filepath.Join(t.TempDir(), "model.safetensors")
 				if err := os.WriteFile(dest, []byte("short"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dest+".llmkube-size", []byte("100"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.WriteFile(filepath.Join(filepath.Dir(dest), "config.json"), []byte("config"), 0o644); err != nil {
@@ -389,5 +397,141 @@ func runMultiFileOnChangeRecordedSizeCase(t *testing.T, kind, state string) {
 	}
 	if state == "truncated-online" && gets.Load() != 1 {
 		t.Errorf("GET requests = %d, want 1", gets.Load())
+	}
+}
+
+// The origin's current size says whether a cache is stale, not whether its
+// original bytes are intact. Exercise both policies against a changed origin.
+func TestMultiFileChangedOriginKeepsCache(t *testing.T) {
+	requireInitShellEnvironment(t)
+	for _, policy := range []string{RefreshPolicyIfNotPresent, RefreshPolicyOnChange} {
+		for _, kind := range []string{"http", "hf", "s3", "partially-pinned"} {
+			for _, record := range []string{"missing", "matching", "truncated"} {
+				t.Run(policy+"/"+kind+"/"+record, func(t *testing.T) {
+					runMultiFileChangedOriginCase(t, policy, kind, record)
+				})
+			}
+		}
+	}
+}
+
+func runMultiFileChangedOriginCase(t *testing.T, policy, kind, record string) {
+	t.Helper()
+	const cached = "previous revision"
+	var heads, gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if kind == "hf" && r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Error("source token missing")
+		}
+		if r.Method == http.MethodHead {
+			heads.Add(1)
+			w.Header().Set("Content-Length", "100")
+			return
+		}
+		gets.Add(1)
+		if policy == RefreshPolicyIfNotPresent && record != "truncated" {
+			_, _ = w.Write([]byte(strings.Repeat("n", 100)))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "model.safetensors")
+	for _, name := range []string{"model.safetensors", "config.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(cached), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if record != "missing" {
+		size := len(cached)
+		if record == "truncated" {
+			size++
+		}
+		if err := os.WriteFile(dest+".llmkube-size", []byte(strconv.Itoa(size)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := []string{"MODEL_FILES=model.safetensors\nconfig.json"}
+	if kind == "hf" {
+		env = append(env, "HF_TOKEN=test-token")
+	}
+	if kind == "s3" {
+		env = append(env, s3TestEnv(srv.URL)...)
+	}
+	if kind == "partially-pinned" {
+		env = append(env, "MODEL_FILE_SHA256="+sha256Hex([]byte(cached))+" config.json")
+	}
+	script := buildMultiFileInitCommand(true, kind == "s3", kind == "hf", kind == "partially-pinned", policy)
+	out, err := runVerifyScriptEnv(t, script, srv.URL, dest, "", env...)
+	for _, name := range []string{"model.safetensors", "config.json"} {
+		if got := readOrFail(t, filepath.Join(dir, name)); got != cached {
+			t.Errorf("failed refresh changed %s to %q", name, got)
+		}
+	}
+	if record == "truncated" {
+		if err == nil {
+			t.Fatalf("accepted cache shorter than its own record: %s", out)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("valid older cache rejected after origin changed: %v\n%s", err, out)
+	}
+	if policy == RefreshPolicyIfNotPresent {
+		if heads.Load() != 0 || gets.Load() != 0 {
+			t.Errorf("IfNotPresent contacted changed origin: HEAD %d, GET %d", heads.Load(), gets.Load())
+		}
+		if got := strings.TrimSpace(readOrFail(t, dest+".llmkube-size")); got != strconv.Itoa(len(cached)) {
+			t.Errorf("local size baseline = %q, want %d", got, len(cached))
+		}
+	} else if heads.Load() == 0 || gets.Load() == 0 || !strings.Contains(out, "kept cached copy") {
+		t.Errorf("did not exercise failed refresh fallback: HEAD %d, GET %d\n%s", heads.Load(), gets.Load(), out)
+	}
+}
+
+func TestMultiFileSizeRecordAtomic(t *testing.T) {
+	requireInitShellEnvironment(t)
+	realMV, err := exec.LookPath("mv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"publish", "backfill"} {
+		t.Run(state, func(t *testing.T) {
+			origin := newRangeOrigin(t, true)
+			dest := filepath.Join(t.TempDir(), "model.safetensors")
+			if state == "backfill" {
+				if err := os.WriteFile(dest, origin.content(), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := t.TempDir()
+			// Observe the record at the rename boundary: readers must see the
+			// old value until the complete replacement is ready beside it.
+			stub := `#!/bin/sh
+if [ "$2" = "$RECORD_DEST" ]; then
+  [ ! -e "$2" ] || exit 1
+  [ "$(cat "$1")" = "$EXPECTED_SIZE" ] || exit 1
+  printf renamed > "$RECORD_OBSERVED"
+fi
+exec "$REAL_MV" "$@"
+`
+			if err := os.WriteFile(filepath.Join(bin, "mv"), []byte(stub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(bin, "observed")
+			env := []string{"MODEL_FILES=model.safetensors", "PATH=" + bin + ":" + os.Getenv("PATH"), "REAL_MV=" + realMV,
+				"RECORD_DEST=" + dest + ".llmkube-size", "EXPECTED_SIZE=" + strconv.Itoa(len(origin.content())), "RECORD_OBSERVED=" + marker}
+			out, err := runVerifyScriptEnv(t, buildMultiFileInitCommand(true, false, false, false, RefreshPolicyIfNotPresent), origin.srv.URL, dest, "", env...)
+			if err != nil {
+				t.Fatalf("init failed: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("size record was not atomically published: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(readOrFail(t, dest+".llmkube-size")); got != strconv.Itoa(len(origin.content())) {
+				t.Errorf("published record = %q", got)
+			}
+		})
 	}
 }

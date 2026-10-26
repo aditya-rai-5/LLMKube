@@ -38,10 +38,10 @@ const (
 	sha256WiredDigestLower = "d9ba44419f2a73ed1a666885066c65a235ab70f337e2b31cbb3d062a5f5b8d4b"
 )
 
+// The atomic writer is shared with unpinned size records, not a digest gate.
 var sha256HelperTokens = []string{
 	"llmkube_sha256_hash",
 	"llmkube_precheck_sha256",
-	"llmkube_atomic_write",
 	"llmkube_marker_hit_sha256",
 	"llmkube_check_sha256",
 	"llmkube_publish_sha256",

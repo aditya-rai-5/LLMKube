@@ -667,11 +667,13 @@ func hfAuthPrefix(isHFAuth bool) string {
 // so it compares equal to sha256sum output.
 const sha256HashFns = `llmkube_sha256_hash() { actual=$(sha256sum "$1" 2>/dev/null | cut -d" " -f1); if [ -z "$actual" ]; then echo "ERROR: could not compute the SHA256 of $1" >&2; return 1; fi; printf '%s' "$actual"; }; llmkube_precheck_sha256() { if [ -z "${MODEL_SHA256:-}" ]; then echo "ERROR: this downloader was built with SHA256 gates but MODEL_SHA256 is unset; refusing to transfer unchecked" >&2; return 1; fi; }; `
 
+const atomicWriteFn = `llmkube_atomic_write() { _llmkube_tmp=$(mktemp "$1.XXXXXX") || return 1; printf '%s' "$2" > "$_llmkube_tmp" && mv "$_llmkube_tmp" "$1"; }; `
+
 // sha256VerifyFns is the download-time gate set: sha256HashFns plus the
 // atomic stamp/marker writers and the verify-then-publish pair.
 // buildPVCVerifyCommand uses sha256HashFns alone, because a pvc:// mount is
 // read-only and cannot carry a stamp.
-const sha256VerifyFns = sha256HashFns + `llmkube_atomic_write() { _llmkube_tmp=$(mktemp "$1.XXXXXX") || return 1; printf '%s' "$2" > "$_llmkube_tmp" && mv "$_llmkube_tmp" "$1"; }; llmkube_stamp_sha256() { llmkube_atomic_write "$1.sha256" "$MODEL_SHA256 $(stat -c '%s %Y' "$1" 2>/dev/null)"; }; llmkube_marker_hit_sha256() { [ -f "$1.$MODEL_SHA256.sha256-rejected" ]; }; llmkube_check_sha256() { if [ "$(cat "$1.sha256" 2>/dev/null)" = "$MODEL_SHA256 $(stat -c '%s %Y' "$1" 2>/dev/null)" ]; then echo "Model verified against ${MODEL_DIGEST_FIELD:-spec.sha256} (stamp hit, skipped re-hashing)"; return 0; fi; actual=$(llmkube_sha256_hash "$1") || return 1; if [ "$actual" != "$MODEL_SHA256" ]; then echo "ERROR: ${MODEL_DIGEST_FIELD:-spec.sha256} mismatch for the cached $1: expected $MODEL_SHA256, computed $actual; leaving it in place (the cache dir may be shared); a fresh download replaces it" >&2; return 1; fi; llmkube_stamp_sha256 "$1"; }; llmkube_publish_sha256() { actual=$(llmkube_sha256_hash "$1") || return 1; if [ "$actual" != "$MODEL_SHA256" ]; then rm -f "$1"; llmkube_atomic_write "$2.$MODEL_SHA256.sha256-rejected" "$MODEL_SHA256"; echo "ERROR: ${MODEL_DIGEST_FIELD:-spec.sha256} mismatch: expected $MODEL_SHA256, computed $actual; discarded $1; recorded $2.$MODEL_SHA256.sha256-rejected" >&2; return 1; fi; mv "$1" "$2" && llmkube_stamp_sha256 "$2" && rm -f "$2.$MODEL_SHA256.sha256-rejected"; }` + " && "
+const sha256VerifyFns = sha256HashFns + atomicWriteFn + `llmkube_stamp_sha256() { llmkube_atomic_write "$1.sha256" "$MODEL_SHA256 $(stat -c '%s %Y' "$1" 2>/dev/null)"; }; llmkube_marker_hit_sha256() { [ -f "$1.$MODEL_SHA256.sha256-rejected" ]; }; llmkube_check_sha256() { if [ "$(cat "$1.sha256" 2>/dev/null)" = "$MODEL_SHA256 $(stat -c '%s %Y' "$1" 2>/dev/null)" ]; then echo "Model verified against ${MODEL_DIGEST_FIELD:-spec.sha256} (stamp hit, skipped re-hashing)"; return 0; fi; actual=$(llmkube_sha256_hash "$1") || return 1; if [ "$actual" != "$MODEL_SHA256" ]; then echo "ERROR: ${MODEL_DIGEST_FIELD:-spec.sha256} mismatch for the cached $1: expected $MODEL_SHA256, computed $actual; leaving it in place (the cache dir may be shared); a fresh download replaces it" >&2; return 1; fi; llmkube_stamp_sha256 "$1"; }; llmkube_publish_sha256() { actual=$(llmkube_sha256_hash "$1") || return 1; if [ "$actual" != "$MODEL_SHA256" ]; then rm -f "$1"; llmkube_atomic_write "$2.$MODEL_SHA256.sha256-rejected" "$MODEL_SHA256"; echo "ERROR: ${MODEL_DIGEST_FIELD:-spec.sha256} mismatch: expected $MODEL_SHA256, computed $actual; discarded $1; recorded $2.$MODEL_SHA256.sha256-rejected" >&2; return 1; fi; mv "$1" "$2" && llmkube_stamp_sha256 "$2" && rm -f "$2.$MODEL_SHA256.sha256-rejected"; }` + " && "
 
 // sha256MultiFileFns defines the per-file verify helpers the multi-file loop
 // runs through (#1978). It is appended to sha256VerifyFns so the loop can set
@@ -1172,12 +1174,12 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 	normalizeFn := `normalize_hf_source() { case "$1" in hf://*) src="${1#hf://}"; rev="${src#*@}"; if [ "$rev" != "$src" ]; then echo "https://huggingface.co/${src%%@*}/resolve/$rev/"; else echo "https://huggingface.co/$src/resolve/main/"; fi ;; *) echo "$1" ;; esac; }` + " && "
 
 	// Per-file verify gates (#1978) are omitted when withSHA256 is false.
-	fns := ""
+	fns := atomicWriteFn
 	pre := ""
 	digestAssign := ""
 	markerGuard := ""
 	sizeHit := ""
-	keepCachedTail := `elif [ -f "$dest" ] && llmkube_cached_size_matches ${remote_size:+"$remote_size"}; then echo "Revalidation unreachable for $rel; kept cached copy"; ` +
+	keepCachedTail := `elif [ -f "$dest" ] && llmkube_cached_size_matches; then echo "Revalidation unreachable for $rel; kept cached copy"; ` +
 		`else echo "ERROR: model artifact $rel could not be validated or downloaded"; exit 1; fi; `
 	if withSHA256 {
 		fns = sha256VerifyFns + sha256MultiFileFns
@@ -1190,7 +1192,7 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 		// hash match), otherwise fail the init. Mirrors remoteRevalidateScript's
 		// keepCached, so an Offline restart cannot serve bytes that fail the
 		// pin. An unpinned file is kept unless its size is known to be wrong.
-		keepCachedTail = `elif [ -f "$dest" ] && { if [ -n "${MODEL_SHA256:-}" ]; then llmkube_accept_file "$dest"; else llmkube_cached_size_matches ${remote_size:+"$remote_size"}; fi; }; then if llmkube_marker_hit_sha256 "$dest"; then echo "Model artifact $rel: the origin served bytes that do not match the pinned spec.fileSha256; kept the pinned cached copy"; else echo "Revalidation unreachable for $rel; kept cached copy"; fi; ` +
+		keepCachedTail = `elif [ -f "$dest" ] && { if [ -n "${MODEL_SHA256:-}" ]; then llmkube_accept_file "$dest"; else llmkube_cached_size_matches; fi; }; then if llmkube_marker_hit_sha256 "$dest"; then echo "Model artifact $rel: the origin served bytes that do not match the pinned spec.fileSha256; kept the pinned cached copy"; else echo "Revalidation unreachable for $rel; kept cached copy"; fi; ` +
 			`else echo "ERROR: model artifact $rel missing and revalidation failed"; exit 1; fi; `
 	}
 	publishFile := func(partial string) string {
@@ -1203,22 +1205,21 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 		return `{ published_size=$(stat -c %s "` + partial + `") && ` + publish + ` && ` +
 			`{ [ "$(stat -c %s "$dest")" = "$published_size" ] || { ` +
 			`rm -f "$dest" "$dest.sha256" "$dest.llmkube-size"; echo "ERROR: published artifact $rel has the wrong size" >&2; false; }; } && ` +
-			`{ printf '%s\n' "$published_size" > "$dest.llmkube-size" || echo "WARNING: could not record staged size for $rel" >&2; }; }`
+			`{ llmkube_atomic_write "$dest.llmkube-size" "$published_size" || echo "WARNING: could not record staged size for $rel" >&2; }; }`
 	}
-	// Record the verified size alongside each staged file. IfNotPresent can then
-	// validate warm caches offline and avoid refreshing just one shard when a
-	// mutable upstream changes. Older cache entries fall back to a size probe.
-	sizeCurl := curlCmd(isHFAuth)
-	if isS3 {
-		sizeCurl = "s3_curl"
+	// A mutable origin's size only proves staleness, not local corruption.
+	// Preserve legacy caches without probing the origin. Backfill their local
+	// baseline under IfNotPresent, except on FUSE where readers must not write.
+	backfill := ""
+	if refreshPolicy != RefreshPolicyOnChange {
+		backfill = `if [ "${cache_fs:-}" != 65735546 ]; then llmkube_atomic_write "$dest.llmkube-size" "$_llmkube_local_size" || echo "WARNING: could not record cached size for $rel" >&2; fi; `
 	}
 	sizeCheck := `llmkube_cached_size_matches() { ` +
 		`_llmkube_local_size=$(stat -c %s "$dest" 2>/dev/null) || return 1; ` +
-		`if [ "$#" -eq 0 ] && [ -f "$dest.llmkube-size" ]; then _llmkube_size=$(cat "$dest.llmkube-size" 2>/dev/null); ` +
+		`if [ -f "$dest.llmkube-size" ]; then _llmkube_size=$(cat "$dest.llmkube-size" 2>/dev/null); ` +
 		`case "$_llmkube_size" in ''|*[!0-9]*) ;; *) [ "$_llmkube_local_size" = "$_llmkube_size" ]; return $?;; esac; fi; ` +
-		`if [ "$#" -gt 0 ]; then _llmkube_size=$1; else _llmkube_size=$(` + sizeCurl + ` -fsSL -I "$url" -o /dev/null -w '%header{content-length}' 2>/dev/null) || _llmkube_size=; fi; ` +
-		`case "$_llmkube_size" in ''|*[!0-9]*) echo "WARNING: origin size unavailable for $rel; keeping cached copy without size validation" >&2; return 0;; esac; ` +
-		`[ "$_llmkube_local_size" = "$_llmkube_size" ]; }; `
+		`echo "WARNING: no valid size record for $rel; keeping cached copy without size validation" >&2; ` +
+		backfill + `return 0; }; `
 	prefix += sizeCheck
 	downloadOrCached := func(download, cachedEcho string) string {
 		accept := `llmkube_cached_size_matches`

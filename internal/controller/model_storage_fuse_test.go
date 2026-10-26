@@ -151,73 +151,91 @@ func TestMultiFileFUSEWarmCache(t *testing.T) {
 	}
 	for _, policy := range []string{RefreshPolicyIfNotPresent, RefreshPolicyOnChange} {
 		for _, s3 := range []bool{false, true} {
-			for _, state := range []string{"offline", "matching", "missing", "truncated"} {
+			for _, state := range []string{"offline", "matching", "missing", "truncated", "changed", "changed-recorded"} {
 				t.Run(fmt.Sprintf("%s/s3-%v/%s", policy, s3, state), func(t *testing.T) {
-					var gets atomic.Int32
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						if r.Method != http.MethodHead {
-							gets.Add(1)
-						}
-						w.Header().Set("Content-Length", "6")
-					}))
-					t.Cleanup(srv.Close)
-					if state == "offline" {
-						srv.Close()
-					}
-					dir := t.TempDir()
-					bin := t.TempDir()
-					stub := "#!/bin/sh\nif [ \"$1\" = -f ]; then echo 65735546; else exec \"$REAL_STAT\" \"$@\"; fi\n"
-					if err := os.WriteFile(filepath.Join(bin, "stat"), []byte(stub), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					cached := "cached"
-					if state == "truncated" {
-						cached = "short"
-					}
-					dest := filepath.Join(dir, "model.safetensors")
-					if state != "missing" {
-						if err := os.WriteFile(dest, []byte(cached), 0o444); err != nil {
-							t.Fatal(err)
-						}
-					}
-					sentinel := filepath.Join(dir, "orphan.tmp")
-					if err := os.WriteFile(sentinel, []byte("untouched"), 0o444); err != nil {
-						t.Fatal(err)
-					}
-					env := []string{"MODEL_FILES=model.safetensors", "PATH=" + bin + ":" + os.Getenv("PATH"), "REAL_STAT=" + realStat}
-					if s3 {
-						env = append(env, s3TestEnv(srv.URL)...)
-					}
-					out, err := runVerifyScriptEnv(t, buildMultiFileInitCommand(true, s3, false, false, policy), srv.URL, dest, "", env...)
-					if state == "missing" || state == "truncated" {
-						if err == nil {
-							t.Fatalf("unsafe FUSE staging succeeded: %s", out)
-						}
-						assertCacheLockCondition(t, out)
-						if s3 && (!strings.Contains(out, "s3:// sources do not support prefetch") || strings.Contains(out, "set spec.modelCache.prefetch")) {
-							t.Errorf("S3 staging error gives an unsupported remedy: %s", out)
-						}
-					} else if err != nil {
-						t.Fatalf("warm FUSE cache failed: %v\n%s", err, out)
-					}
-					if gets.Load() != 0 {
-						t.Errorf("serving pod attempted %d downloads on FUSE", gets.Load())
-					}
-					if state != "missing" && readOrFail(t, dest) != cached {
-						t.Error("serving pod modified the FUSE cache")
-					}
-					if readOrFail(t, sentinel) != "untouched" {
-						t.Error("serving pod swept the FUSE cache")
-					}
-					if _, err := os.Stat(filepath.Join(dir, ".llmkube-download.lock")); !os.IsNotExist(err) {
-						t.Error("serving pod created a lock file on FUSE")
-					}
-					if _, err := os.Stat(dest + ".llmkube-size"); !os.IsNotExist(err) {
-						t.Error("serving pod wrote a size record on FUSE")
-					}
+					runMultiFileFUSEWarmCacheCase(t, realStat, policy, s3, state)
 				})
 			}
 		}
+	}
+}
+
+func runMultiFileFUSEWarmCacheCase(t *testing.T, realStat, policy string, s3 bool, state string) {
+	t.Helper()
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			gets.Add(1)
+		}
+		if strings.HasPrefix(state, "changed") {
+			w.Header().Set("Content-Length", "100")
+		} else {
+			w.Header().Set("Content-Length", "6")
+		}
+	}))
+	t.Cleanup(srv.Close)
+	if state == "offline" {
+		srv.Close()
+	}
+	dir := t.TempDir()
+	bin := t.TempDir()
+	stub := "#!/bin/sh\nif [ \"$1\" = -f ]; then echo 65735546; else exec \"$REAL_STAT\" \"$@\"; fi\n"
+	if err := os.WriteFile(filepath.Join(bin, "stat"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cached := "cached"
+	if state == "truncated" {
+		cached = "short"
+	}
+	dest := filepath.Join(dir, "model.safetensors")
+	if state != "missing" {
+		if err := os.WriteFile(dest, []byte(cached), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if state == "truncated" || state == "changed-recorded" {
+		if err := os.WriteFile(dest+".llmkube-size", []byte("6"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sentinel := filepath.Join(dir, "orphan.tmp")
+	if err := os.WriteFile(sentinel, []byte("untouched"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"MODEL_FILES=model.safetensors", "PATH=" + bin + ":" + os.Getenv("PATH"), "REAL_STAT=" + realStat}
+	if s3 {
+		env = append(env, s3TestEnv(srv.URL)...)
+	}
+	out, err := runVerifyScriptEnv(t, buildMultiFileInitCommand(true, s3, false, false, policy), srv.URL, dest, "", env...)
+	if state == "missing" || state == "truncated" {
+		if err == nil {
+			t.Fatalf("unsafe FUSE staging succeeded: %s", out)
+		}
+		assertCacheLockCondition(t, out)
+		if s3 && (!strings.Contains(out, "s3:// sources do not support prefetch") || strings.Contains(out, "set spec.modelCache.prefetch")) {
+			t.Errorf("S3 staging error gives an unsupported remedy: %s", out)
+		}
+	} else if err != nil {
+		t.Fatalf("warm FUSE cache failed: %v\n%s", err, out)
+	}
+	if gets.Load() != 0 {
+		t.Errorf("serving pod attempted %d downloads on FUSE", gets.Load())
+	}
+	if state != "missing" && readOrFail(t, dest) != cached {
+		t.Error("serving pod modified the FUSE cache")
+	}
+	if readOrFail(t, sentinel) != "untouched" {
+		t.Error("serving pod swept the FUSE cache")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".llmkube-download.lock")); !os.IsNotExist(err) {
+		t.Error("serving pod created a lock file on FUSE")
+	}
+	if state == "truncated" || state == "changed-recorded" {
+		if got := readOrFail(t, dest+".llmkube-size"); got != "6" {
+			t.Errorf("serving pod changed size record to %q", got)
+		}
+	} else if _, err := os.Stat(dest + ".llmkube-size"); !os.IsNotExist(err) {
+		t.Error("serving pod wrote a size record on FUSE")
 	}
 }
 
