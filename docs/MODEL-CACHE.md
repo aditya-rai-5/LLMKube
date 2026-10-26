@@ -98,7 +98,8 @@ to unpinned files in a partially pinned `spec.fileSha256` manifest.
 If the origin is unreachable, rate limited, or does not provide a numeric
 size, `IfNotPresent` keeps the cached file with a warning and does not
 re-download it. `OnChange` also keeps a cached file after a failed refresh
-unless a size probe proved it was the wrong size. Checksum-pinned files must
+unless an origin size probe, or the recorded staged size when the origin
+size is unavailable, proves it is the wrong size. Checksum-pinned files must
 still pass their local digest check. Size checks cannot detect corruption of
 the same length; use `spec.fileSha256` for content verification.
 The downloader checks the size again after publishing and removes the

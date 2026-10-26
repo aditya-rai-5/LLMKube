@@ -329,3 +329,65 @@ func TestMultiFileOnChangeOfflineCache(t *testing.T) {
 		}
 	}
 }
+
+func TestMultiFileOnChangeRecordedSize(t *testing.T) {
+	requireInitShellEnvironment(t)
+	for _, kind := range []string{"http", "hf", "s3", "partially-pinned"} {
+		for _, state := range []string{"truncated-offline", "complete-offline", "truncated-online"} {
+			t.Run(kind+"/"+state, func(t *testing.T) { runMultiFileOnChangeRecordedSizeCase(t, kind, state) })
+		}
+	}
+}
+
+func runMultiFileOnChangeRecordedSizeCase(t *testing.T, kind, state string) {
+	t.Helper()
+	content := "complete model artifact"
+	originState := "offline"
+	if state == "truncated-online" {
+		originState = "truncated"
+	}
+	url, gets := newMultiFileCachedSizeOrigin(t, kind, originState, content)
+	cached := "short"
+	if state == "complete-offline" {
+		cached = content
+	}
+	dest := filepath.Join(t.TempDir(), "model.safetensors")
+	for path, data := range map[string]string{dest: cached, dest + ".llmkube-size": strconv.Itoa(len(content)), filepath.Join(filepath.Dir(dest), "config.json"): content} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := []string{"MODEL_FILES=model.safetensors"}
+	if kind == "hf" {
+		env = append(env, "HF_TOKEN=test-token")
+	}
+	if kind == "s3" {
+		env = append(env, s3TestEnv(url)...)
+	}
+	if kind == "partially-pinned" {
+		env = []string{"MODEL_FILES=model.safetensors\nconfig.json", "MODEL_FILE_SHA256=" + sha256Hex([]byte(content)) + " config.json"}
+	}
+	script := buildMultiFileInitCommand(true, kind == "s3", kind == "hf", kind == "partially-pinned", RefreshPolicyOnChange)
+	out, err := runVerifyScriptEnv(t, script, url, dest, "", env...)
+	if state == "truncated-offline" {
+		if err == nil {
+			t.Fatalf("accepted a truncated cache despite its staged size record: %s", out)
+		}
+		if got := readOrFail(t, dest); got != cached {
+			t.Errorf("failed refresh changed cached artifact to %q", got)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("init failed: %v\n%s", err, out)
+	}
+	if got := readOrFail(t, dest); got != content {
+		t.Errorf("cached artifact = %q, want %q", got, content)
+	}
+	if strings.Contains(out, "keeping cached copy without size validation") {
+		t.Errorf("ignored the staged size record: %s", out)
+	}
+	if state == "truncated-online" && gets.Load() != 1 {
+		t.Errorf("GET requests = %d, want 1", gets.Load())
+	}
+}

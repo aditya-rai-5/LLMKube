@@ -1177,7 +1177,7 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 	digestAssign := ""
 	markerGuard := ""
 	sizeHit := ""
-	keepCachedTail := `elif [ -f "$dest" ] && llmkube_cached_size_matches "$remote_size"; then echo "Revalidation unreachable for $rel; kept cached copy"; ` +
+	keepCachedTail := `elif [ -f "$dest" ] && llmkube_cached_size_matches ${remote_size:+"$remote_size"}; then echo "Revalidation unreachable for $rel; kept cached copy"; ` +
 		`else echo "ERROR: model artifact $rel could not be validated or downloaded"; exit 1; fi; `
 	if withSHA256 {
 		fns = sha256VerifyFns + sha256MultiFileFns
@@ -1190,7 +1190,7 @@ func buildMultiFileInitCommand(useCache, isS3, isHFAuth, withSHA256 bool, refres
 		// hash match), otherwise fail the init. Mirrors remoteRevalidateScript's
 		// keepCached, so an Offline restart cannot serve bytes that fail the
 		// pin. An unpinned file is kept unless its size is known to be wrong.
-		keepCachedTail = `elif [ -f "$dest" ] && { if [ -n "${MODEL_SHA256:-}" ]; then llmkube_accept_file "$dest"; else llmkube_cached_size_matches "$remote_size"; fi; }; then if llmkube_marker_hit_sha256 "$dest"; then echo "Model artifact $rel: the origin served bytes that do not match the pinned spec.fileSha256; kept the pinned cached copy"; else echo "Revalidation unreachable for $rel; kept cached copy"; fi; ` +
+		keepCachedTail = `elif [ -f "$dest" ] && { if [ -n "${MODEL_SHA256:-}" ]; then llmkube_accept_file "$dest"; else llmkube_cached_size_matches ${remote_size:+"$remote_size"}; fi; }; then if llmkube_marker_hit_sha256 "$dest"; then echo "Model artifact $rel: the origin served bytes that do not match the pinned spec.fileSha256; kept the pinned cached copy"; else echo "Revalidation unreachable for $rel; kept cached copy"; fi; ` +
 			`else echo "ERROR: model artifact $rel missing and revalidation failed"; exit 1; fi; `
 	}
 	publishFile := func(partial string) string {
