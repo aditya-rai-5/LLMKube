@@ -49,7 +49,8 @@ type BundleMeta struct {
 
 // BundleDir returns the directory a record's bundle belongs in.
 //
-// The layout is <root>/<repo>/<issue>/<taskName>-<recordedAt> (or
+// New attempts use <root>/<repo>/<issue>/<taskName>-<taskUID>-attempt-<n>.
+// Legacy records use <root>/<repo>/<issue>/<taskName>-<recordedAt> (or
 // <taskName>-<taskUID> if RecordedAt is empty). Repo keeps its slash, so an
 // owner/name slug occupies two levels and a prefix listing for one repo works
 // naturally; an empty repo is normalized to "no-repo". Colons are stripped
@@ -89,6 +90,9 @@ func BundleDir(root string, rec audit.Record) (string, error) {
 		stamp = rec.Task.UID
 	}
 	stamp = strings.ReplaceAll(stamp, ":", "-")
+	if rec.Attempt > 0 {
+		stamp = audit.AttemptKey(rec.Task.UID, rec.Attempt)
+	}
 
 	resolvedRoot, err := resolveRoot(root)
 	if err != nil {
@@ -107,7 +111,8 @@ func BundleDir(root string, rec audit.Record) (string, error) {
 // WriteBundle writes audit.json, meta.json, and transcript.json (when
 // transcript is non-empty) into the record's bundle directory.
 //
-// An existing bundle is left untouched, because bundles are immutable. When
+// An existing bundle is left untouched, because bundles are immutable. Each
+// new execution attempt has its own key. For legacy records, when
 // RecordedAt is set a retried task writes a different bundle, since the
 // timestamp differs. When the key falls back to Task.UID it does not: a
 // Kubernetes object UID is constant for the object's lifetime, so a re-run of

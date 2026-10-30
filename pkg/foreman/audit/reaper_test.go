@@ -204,3 +204,37 @@ func TestReaperRunDisabledRetentionNeverSweeps(t *testing.T) {
 
 // silence unused-import linter when the test list above shrinks.
 var _ = client.IgnoreNotFound
+
+func TestSweepRetainedTranscripts(t *testing.T) {
+	for _, retention := range []time.Duration{time.Hour, 0} {
+		t.Run(retention.String(), func(t *testing.T) {
+			old := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+			objects := []client.Object{
+				makeAuditCM("audit-system", "audit", 2*time.Hour),
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: "old-transcript", Namespace: "tasks", CreationTimestamp: old,
+					Labels: map[string]string{TranscriptLabel: "true"},
+				}},
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: "recent-transcript", Namespace: "tasks", CreationTimestamp: metav1.Now(),
+					Labels: map[string]string{TranscriptLabel: "true"},
+				}},
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "tasks", CreationTimestamp: old}},
+			}
+			c := fake.NewClientBuilder().WithObjects(objects...).Build()
+			if _, err := Sweep(context.Background(), c, retention); err != nil {
+				t.Fatal(err)
+			}
+			for i, obj := range objects {
+				err := c.Get(context.Background(), client.ObjectKeyFromObject(obj), &corev1.ConfigMap{})
+				if retention > 0 && i < 2 {
+					if !apierrors.IsNotFound(err) {
+						t.Errorf("expired %s not deleted: %v", obj.GetName(), err)
+					}
+				} else if err != nil {
+					t.Errorf("%s should remain: %v", obj.GetName(), err)
+				}
+			}
+		})
+	}
+}

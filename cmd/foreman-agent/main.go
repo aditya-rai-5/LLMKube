@@ -617,6 +617,7 @@ func main() {
 func runTaskCommand(args []string) {
 	fs := flag.NewFlagSet("run-task", flag.ExitOnError)
 	var (
+		attemptKey               string
 		taskName                 string
 		namespace                string
 		workspaceDir             string
@@ -634,6 +635,8 @@ func runTaskCommand(args []string) {
 	)
 	fs.StringVar(&taskName, "task", "",
 		"Name of the AgenticTask to run. Required.")
+	fs.StringVar(&attemptKey, "attempt-key", "",
+		"Expected execution attempt, set by the coder Job submitter.")
 	fs.StringVar(&namespace, "namespace", "default",
 		"Namespace of the AgenticTask to run.")
 	fs.StringVar(&workspaceDir, "workspace-dir", "",
@@ -699,6 +702,7 @@ func runTaskCommand(args []string) {
 
 	seams := githubForgeSeams()
 	res, err := foremanagent.RunTask(ctx, foremanagent.RunTaskConfig{
+		AttemptKey:                   attemptKey,
 		Client:                       kc,
 		Task:                         types.NamespacedName{Namespace: namespace, Name: taskName},
 		WorkspaceDir:                 workspaceDir,

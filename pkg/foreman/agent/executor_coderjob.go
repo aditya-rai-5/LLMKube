@@ -28,6 +28,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	foremanv1alpha1 "github.com/defilantech/llmkube/api/foreman/v1alpha1"
+	"github.com/defilantech/llmkube/pkg/foreman/audit"
 )
 
 // CoderJobSubmitter is the seam between the executor (this package) and
@@ -53,6 +54,7 @@ type CoderJobRequest struct {
 	// TaskName / TaskNamespace identify the AgenticTask the Job runs.
 	TaskName      string
 	TaskNamespace string
+	AttemptKey    string
 
 	// Image is the per-task container image from
 	// Agent.spec.execution.image. Empty lets the submitter default it.
@@ -169,6 +171,7 @@ func (e *NativeAgentLoopExecutor) executeCoderJob(
 	req := CoderJobRequest{
 		TaskName:      task.Name,
 		TaskNamespace: task.Namespace,
+		AttemptKey:    audit.AttemptKey(string(task.UID), task.Status.Attempt),
 		// Controller=true ties the Job to the AgenticTask so Kubernetes GC
 		// cascades the Job (and its pods) when the task is deleted (#1535).
 		//
@@ -265,10 +268,13 @@ func (e *NativeAgentLoopExecutor) stampJobName(ctx context.Context, task *forema
 		log.Error(err, "stamping status.jobName: refetch failed")
 		return
 	}
+	if fresh.UID != task.UID || fresh.Status.Attempt != task.Status.Attempt {
+		return // a delayed callback belongs to an older execution.
+	}
 	if fresh.Status.JobName == jobName {
 		return // already set (e.g. a duplicate callback); no-op.
 	}
-	patch := client.MergeFrom(fresh.DeepCopy())
+	patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	fresh.Status.JobName = jobName
 	if err := e.Client.Status().Patch(ctx, &fresh, patch); err != nil {
 		// Not fatal: the terminal patch re-lifts jobName from Result.Extra.

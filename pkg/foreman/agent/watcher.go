@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -513,8 +514,19 @@ func (w *AgenticTaskWatcher) pollOnce(ctx context.Context, namespace string) err
 // concurrency: if the patch fails because someone else moved the task,
 // the next poll will see the new phase and skip cleanly.
 func (w *AgenticTaskWatcher) claim(ctx context.Context, t *foremanv1alpha1.AgenticTask) error {
-	patch := client.MergeFrom(t.DeepCopy())
+	patch := client.MergeFromWithOptions(t.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	now := metav1.Now()
+	t.Status.Attempt++
+	// A retry must not inherit a previous result when its executor fails
+	// before producing a new envelope or transcript.
+	t.Status.FinishedAt = nil
+	t.Status.Verdict = ""
+	t.Status.FailureReason = ""
+	t.Status.Result = nil
+	t.Status.Branch = ""
+	t.Status.CommitSHA = ""
+	t.Status.JobName = ""
+	t.Status.TranscriptRef = ""
 	t.Status.Phase = foremanv1alpha1.AgenticTaskPhaseRunning
 	t.Status.ClaimedAt = &now
 	t.Status.StartedAt = &now
@@ -679,6 +691,25 @@ func (w *AgenticTaskWatcher) patchTerminal(
 	res *Result,
 	execErr error,
 ) error {
+	// Execute will not be called again for this claim. Re-read ownership on
+	// conflicts so a concurrent metadata update cannot discard its result.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		return w.patchTerminalOnce(ctx, t, res, execErr)
+	})
+}
+
+func (w *AgenticTaskWatcher) ownsClaim(current, claimed *foremanv1alpha1.AgenticTask) bool {
+	return current.UID == claimed.UID && current.Status.Attempt == claimed.Status.Attempt &&
+		current.Status.AssignedNode == w.NodeName && current.Status.ClaimedAt != nil &&
+		claimed.Status.ClaimedAt != nil && current.Status.ClaimedAt.Equal(claimed.Status.ClaimedAt)
+}
+
+func (w *AgenticTaskWatcher) patchTerminalOnce(
+	ctx context.Context,
+	t *foremanv1alpha1.AgenticTask,
+	res *Result,
+	execErr error,
+) error {
 	var fresh foremanv1alpha1.AgenticTask
 	key := types.NamespacedName{Namespace: t.Namespace, Name: t.Name}
 	if err := w.Client.Get(ctx, key, &fresh); err != nil {
@@ -694,10 +725,7 @@ func (w *AgenticTaskWatcher) patchTerminal(
 	// another node re-claimed the task while we were partitioned, this agent
 	// no longer owns the task and must not write a terminal status over the
 	// new owner's state.
-	if fresh.Status.AssignedNode != w.NodeName ||
-		fresh.Status.ClaimedAt == nil ||
-		t.Status.ClaimedAt == nil ||
-		!fresh.Status.ClaimedAt.Equal(t.Status.ClaimedAt) {
+	if !w.ownsClaim(&fresh, t) {
 		logf.FromContext(ctx).WithName("agentictask-watcher").WithValues("task", t.Name).
 			Info("terminal patch skipped: task no longer owned by this agent",
 				"assignedNode", fresh.Status.AssignedNode,
@@ -705,7 +733,7 @@ func (w *AgenticTaskWatcher) patchTerminal(
 		return nil
 	}
 
-	patch := client.MergeFrom(fresh.DeepCopy())
+	patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	now := metav1.Now()
 	fresh.Status.FinishedAt = &now
 
@@ -822,7 +850,10 @@ func (w *AgenticTaskWatcher) patchTerminal(
 	if getErr := w.Client.Get(ctx, key, &fallback); getErr != nil {
 		return fmt.Errorf("fallback refetch %s: %w", key, getErr)
 	}
-	fallbackPatch := client.MergeFrom(fallback.DeepCopy())
+	if !w.ownsClaim(&fallback, t) {
+		return nil
+	}
+	fallbackPatch := client.MergeFromWithOptions(fallback.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	fallbackNow := metav1.Now()
 	fallback.Status.Phase = foremanv1alpha1.AgenticTaskPhaseFailed
 	fallback.Status.Verdict = foremanv1alpha1.AgenticTaskVerdictIncomplete
@@ -832,6 +863,7 @@ func (w *AgenticTaskWatcher) patchTerminal(
 	// x-kubernetes-preserve-unknown-fields so it survives the patch even
 	// if Verdict inside the JSON is not in the current enum.
 	fallback.Status.Result = &runtime.RawExtension{Raw: raw}
+	fallback.Status.TranscriptRef = fresh.Status.TranscriptRef
 
 	// Truncate the validation error message so the condition stays within
 	// apiserver limits (conditions.message is limited to 32768 chars).

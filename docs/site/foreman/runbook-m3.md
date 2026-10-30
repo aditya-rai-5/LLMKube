@@ -180,10 +180,26 @@ kubectl get agentictask m3-coder-demo -o yaml | yq '.status'
 
 # Transcript:
 kubectl get cm -l foreman.llmkube.dev/transcript-of=m3-coder-demo
-kubectl get cm foreman-transcript-m3-coder-demo -o jsonpath='{.data.transcript\.json}' \
+transcript=$(kubectl get agentictask m3-coder-demo -o jsonpath='{.status.transcriptRef}')
+kubectl get cm "$transcript" -o jsonpath='{.data.transcript\.json}' \
   | jq '.messages | length' # how many turns
-kubectl get cm foreman-transcript-m3-coder-demo -o jsonpath='{.data.meta\.json}' | jq
+kubectl get cm "$transcript" -o jsonpath='{.data.meta\.json}' | jq
 ```
+
+Each execution claim increments `status.attempt`. Audit and transcript ConfigMap
+names include the task UID and attempt number, so retrying or recreating the task
+preserves earlier outcomes and transcripts. List audits with
+`kubectl get cm -l foreman.llmkube.dev/audit-task=m3-coder-demo`; each audit's
+`transcriptRef` names its own transcript in the task namespace. The status field
+points to the latest completed attempt.
+
+New transcripts survive task deletion and use the operator's existing
+`--audit-retention` period (Helm: `operator.audit.retention`, seven days by
+default), measured from ConfigMap creation. A zero duration disables cleanup.
+Legacy records remain readable; already overwritten or deleted evidence cannot
+be recovered. Upgrade the Foreman CRDs, operator, agents, and coder images
+together: the attempt counter and the Job's `--attempt-key` check require the
+updated components.
 
 Expected phase progression:
 
@@ -236,7 +252,7 @@ gh pr create \
 
 - [x] Built locally via the foreman coder agent.
 - [x] `make fmt vet lint test` passed inside the agent's workspace
-      (see transcript ConfigMap `foreman-transcript-m3-coder-demo`).
+      (see transcript ConfigMap named by `status.transcriptRef`).
 - [x] DCO sign-off present.
 
 Fixes #<N>
@@ -248,7 +264,7 @@ BODY
 A clean M3 demo run produces:
 
 - One AgenticTask in `Succeeded` / `verdict=GO`.
-- One ConfigMap `foreman-transcript-m3-coder-demo` carrying the full
+- One attempt-scoped transcript ConfigMap carrying the full
   turn-by-turn transcript (truncated marker only if the run exceeded
   ~1 MiB).
 - One branch `foreman/issue-<N>` on `Defilan/LLMKube` whose head

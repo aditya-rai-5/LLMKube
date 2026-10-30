@@ -174,6 +174,8 @@ type RunCoderJobConfig struct {
 
 // RunCoderJobArgs are the per-run inputs: which AgenticTask the Job runs.
 type RunCoderJobArgs struct {
+	// AttemptKey fences a delayed Job against a later claim of the same task.
+	AttemptKey string
 	// TaskName is the AgenticTask name passed to run-task --task.
 	TaskName string
 
@@ -282,6 +284,7 @@ func (r *RunCoderJob) Submit(ctx context.Context, req agent.CoderJobRequest) (ag
 	}
 
 	res, err := sub.Run(ctx, RunCoderJobArgs{
+		AttemptKey:     req.AttemptKey,
 		TaskName:       req.TaskName,
 		TaskNamespace:  req.TaskNamespace,
 		OwnerReference: req.OwnerReference,
@@ -324,6 +327,7 @@ func (r *RunCoderJob) Run(ctx context.Context, args RunCoderJobArgs) (CoderJobRe
 	jobName := cfg.NameFn(args.TaskName)
 
 	rendered, err := renderCoderJob(coderRendererInput{
+		AttemptKey:              args.AttemptKey,
 		Name:                    jobName,
 		Namespace:               cfg.Namespace,
 		Image:                   cfg.Image,
@@ -557,6 +561,7 @@ func parseRunTaskLog(logTail string) agent.RunTaskResult {
 // coder Job template. Kept separate from the public Config + args structs
 // so the template stays stable across signature changes upstream.
 type coderRendererInput struct {
+	AttemptKey              string
 	Name                    string
 	Namespace               string
 	Image                   string

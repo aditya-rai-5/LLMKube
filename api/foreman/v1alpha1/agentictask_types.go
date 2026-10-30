@@ -620,6 +620,12 @@ func (t *AgenticTask) SucceededOnTarget() bool {
 
 // AgenticTaskStatus defines the observed state of an AgenticTask.
 type AgenticTaskStatus struct {
+	// Attempt counts execution claims for this task UID. It survives claim
+	// recovery so a redispatch cannot overwrite the previous run's records.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Attempt int64 `json:"attempt,omitempty"`
+
 	// Phase is the current lifecycle phase.
 	// +optional
 	Phase AgenticTaskPhase `json:"phase,omitempty"`

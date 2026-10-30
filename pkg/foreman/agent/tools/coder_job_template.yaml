@@ -89,6 +89,9 @@ spec:
             - {{ .TaskName }}
             - --namespace
             - {{ .TaskNamespace }}
+            {{- if .AttemptKey }}
+            - --attempt-key={{ .AttemptKey }}
+            {{- end }}
             - --workspace-dir
             - /workspace
             {{- if .GitRemoteURL }}

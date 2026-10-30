@@ -87,7 +87,8 @@ func TestRecordTerminalWritesOnceAndSetsAnnotation(t *testing.T) {
 	}
 	// audit CM exists in the task namespace (empty audit ns -> task ns)
 	var cm corev1.ConfigMap
-	if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: "foreman-audit-coder-89"}, &cm); err != nil {
+	key := types.NamespacedName{Namespace: "default", Name: "foreman-audit-coder-89-uid-1-attempt-0"}
+	if err := c.Get(ctx, key, &cm); err != nil {
 		t.Fatalf("audit CM not written: %v", err)
 	}
 	// annotation guard set on the task
@@ -103,8 +104,41 @@ func TestRecordTerminalWritesOnceAndSetsAnnotation(t *testing.T) {
 	if err := RecordTerminal(ctx, c, &got, "", logr.Discard()); err != nil {
 		t.Fatalf("second RecordTerminal: %v", err)
 	}
-	err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: "foreman-audit-coder-89"}, &corev1.ConfigMap{})
+	err := c.Get(ctx, key, &corev1.ConfigMap{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("already-audited task must not re-write the record; got err=%v", err)
+	}
+}
+
+func TestRecordTerminalLegacyMarkerDoesNotSuppressNewAttempt(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = foremanv1alpha1.AddToScheme(scheme)
+	task := coderTask()
+	task.Annotations = map[string]string{AuditedAnnotation: "true"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).WithStatusSubresource(task).Build()
+	if err := RecordTerminal(ctx, c, task, "", logr.Discard()); err != nil {
+		t.Fatal(err)
+	}
+	var list corev1.ConfigMapList
+	if err := c.List(ctx, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 0 {
+		t.Fatal("legacy terminal task was audited again on upgrade")
+	}
+	task.Status.Attempt = 1
+	if err := c.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordTerminal(ctx, c, task, "", logr.Discard()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.List(ctx, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("new attempt has %d audits, want 1", len(list.Items))
 	}
 }

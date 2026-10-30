@@ -248,7 +248,7 @@ operator:
   # outlive the AgenticTask so it remains a compliance trail after
   # task GC. That design choice leaves the records to accumulate
   # unbounded in the task namespace over time, so the operator runs
-  # a periodic reaper that deletes any audit CM older than
+  # a periodic reaper that deletes audit and retained transcript CMs older than
   # `audit.retention`. Set retention to a zero-duration (e.g. "0s",
   # "0m", "0") to disable the reaper entirely.
   #
@@ -257,7 +257,7 @@ operator:
   # cannot double-sweep, and a standalone (replicaCount=1) deployment
   # runs it on the only replica.
   audit:
-    # Maximum age before an audit-record ConfigMap is deleted.
+    # Maximum age before an audit or retained transcript ConfigMap is deleted.
     # Default: 7 days. Override shorter for tighter retention
     # (e.g. "24h"); override longer for compliance-driven horizons.
     # Set to "0s" / "0m" / "0" to disable the reaper.

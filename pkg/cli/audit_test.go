@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -70,5 +71,31 @@ func TestExportAuditRecordsOrderedAndFiltered(t *testing.T) {
 	}
 	if n := len(strings.Split(strings.TrimSpace(buf3.String()), "\n")); n != 2 {
 		t.Errorf("since filter: want 2, got %d", n)
+	}
+}
+
+func TestExportAuditPreservesAttemptsAndLegacyRecords(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithObjects(auditCM("legacy", "2026-01-01T00:00:00Z", "repo", "GO")).Build()
+	for i, verdict := range []string{"INCOMPLETE", "GO"} {
+		rec := audit.Record{
+			SchemaVersion: audit.SchemaVersion, Attempt: int64(i + 1),
+			Task: audit.TaskRef{Name: "retried", Namespace: "default", UID: "task-uid"}, Verdict: verdict,
+		}
+		if err := audit.WriteRecord(ctx, c, "default", rec, logr.Discard()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out strings.Builder
+	if err := exportAuditRecords(ctx, c, "default", "", "", &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("exported %d records, want 3: %s", len(lines), out.String())
+	}
+	if !strings.Contains(out.String(), `"attempt":1`) || !strings.Contains(out.String(), `"attempt":2`) ||
+		!strings.Contains(out.String(), `"name":"legacy"`) {
+		t.Fatalf("export lost attempt history: %s", out.String())
 	}
 }

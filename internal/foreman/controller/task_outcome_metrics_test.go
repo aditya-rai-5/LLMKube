@@ -178,3 +178,53 @@ func TestTerminalMetricEmittedAtMostOnceOnAuditFailure(t *testing.T) {
 		t.Errorf("counter must increment at most once across both passes, got +%v (audit write failed both times)", got)
 	}
 }
+
+func TestTerminalMetricAndAuditOncePerAttempt(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = foremanv1alpha1.AddToScheme(scheme)
+	task := newTask("attempt-audit")
+	task.Spec.Kind = foremanv1alpha1.AgenticTaskKindIssueFix
+	task.Spec.AgentRef = &corev1.LocalObjectReference{Name: "attempt-metric-agent"}
+	task.Status.Phase = foremanv1alpha1.AgenticTaskPhaseSucceeded
+	task.Status.Verdict = foremanv1alpha1.AgenticTaskVerdictGo
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task).WithStatusSubresource(task).Build()
+	r := &AgenticTaskReconciler{Client: c, Scheme: scheme}
+	key := client.ObjectKeyFromObject(task)
+	agent, kind, verdict, outcome, _, _ := taskOutcomeLabels(task)
+	counter := llmkubemetrics.ForemanTaskCompletedTotal.WithLabelValues(agent, kind, verdict, outcome)
+	read := func() float64 {
+		t.Helper()
+		var metric dto.Metric
+		if err := counter.Write(&metric); err != nil {
+			t.Fatal(err)
+		}
+		return metric.GetCounter().GetValue()
+	}
+	before := read()
+	for attempt := int64(1); attempt <= 2; attempt++ {
+		if err := c.Get(ctx, key, task); err != nil {
+			t.Fatal(err)
+		}
+		task.Status.Attempt = attempt
+		if err := c.Status().Update(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := read() - before; got != float64(attempt) {
+			t.Fatalf("completed counter increment = %v, want %d", got, attempt)
+		}
+	}
+	var cms corev1.ConfigMapList
+	if err := c.List(ctx, &cms); err != nil {
+		t.Fatal(err)
+	}
+	if len(cms.Items) != 2 {
+		t.Fatalf("retained %d audits, want 2", len(cms.Items))
+	}
+}

@@ -27,7 +27,7 @@
 #   status.result.kind=native-agent-loop
 #   status.result.extra.branch=foreman/issue-<N>
 #   status.result.extra.commitSHA=<sha>
-#   status.result.extra.transcriptRef={kind: ConfigMap, name: foreman-transcript-m3-coder-demo, ...}
+#   status.result.extra.transcriptRef={kind: ConfigMap, name: foreman-transcript-m3-coder-demo-<uid>-attempt-1, ...}
 #
 # Then manually open a PR (M4 will automate this):
 #   gh pr create \

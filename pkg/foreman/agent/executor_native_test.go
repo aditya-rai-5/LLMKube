@@ -43,6 +43,7 @@ import (
 	"github.com/defilantech/llmkube/pkg/foreman/agent/githubissue"
 	"github.com/defilantech/llmkube/pkg/foreman/agent/oai"
 	"github.com/defilantech/llmkube/pkg/foreman/agent/repo"
+	"github.com/defilantech/llmkube/pkg/foreman/audit"
 )
 
 // execWithAgent mirrors what the dispatch loop does around Execute: resolve
@@ -484,12 +485,11 @@ func TestNativeExecutor_HappyPathPushesBranch(t *testing.T) {
 		t.Errorf("branch not on remote: %s", out)
 	}
 
-	// Transcript ConfigMap should exist with the owner-ref pointing at
-	// the task.
+	// Transcript ConfigMap survives task deletion until retention expires.
 	var cm corev1.ConfigMap
 	key := types.NamespacedName{
 		Namespace: task.Namespace,
-		Name:      "foreman-transcript-" + task.Name,
+		Name:      audit.ConfigMapName("foreman-transcript-", task.Name, string(task.UID), task.Status.Attempt),
 	}
 	if err := c.Get(context.Background(), key, &cm); err != nil {
 		t.Fatalf("get transcript cm: %v", err)
@@ -500,8 +500,8 @@ func TestNativeExecutor_HappyPathPushesBranch(t *testing.T) {
 	if got := cm.Labels["foreman.llmkube.dev/transcript-of"]; got != task.Name {
 		t.Errorf("transcript label: want %q got %q", task.Name, got)
 	}
-	if len(cm.OwnerReferences) == 0 || cm.OwnerReferences[0].UID != task.UID {
-		t.Errorf("owner ref not set on transcript cm: %+v", cm.OwnerReferences)
+	if len(cm.OwnerReferences) != 0 {
+		t.Errorf("transcript must survive task deletion: %+v", cm.OwnerReferences)
 	}
 }
 
@@ -981,7 +981,10 @@ func TestNativeExecutor_ModelEmitsNoGo(t *testing.T) {
 	}
 
 	// Transcript still written.
-	cmKey := types.NamespacedName{Namespace: task.Namespace, Name: "foreman-transcript-" + task.Name}
+	cmKey := types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      audit.ConfigMapName("foreman-transcript-", task.Name, string(task.UID), task.Status.Attempt),
+	}
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), cmKey, &cm); err != nil {
 		t.Fatalf("transcript should exist on NO-GO path: %v", err)
@@ -1491,7 +1494,10 @@ func TestNativeExecutor_ReviewerGoIsApproveNotCommit(t *testing.T) {
 	}
 
 	// Transcript still written.
-	cmKey := types.NamespacedName{Namespace: task.Namespace, Name: "foreman-transcript-" + task.Name}
+	cmKey := types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      audit.ConfigMapName("foreman-transcript-", task.Name, string(task.UID), task.Status.Attempt),
+	}
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), cmKey, &cm); err != nil {
 		t.Errorf("transcript should exist on reviewer path: %v", err)
@@ -2069,7 +2075,10 @@ func TestNativeExecutor_DeterministicGateAgent(t *testing.T) {
 	// No transcript ConfigMap on the deterministic path -- there are
 	// no model turns to preserve. Assert it is NOT present.
 	var cm corev1.ConfigMap
-	cmKey := types.NamespacedName{Namespace: task.Namespace, Name: "foreman-transcript-" + task.Name}
+	cmKey := types.NamespacedName{
+		Namespace: task.Namespace,
+		Name:      audit.ConfigMapName("foreman-transcript-", task.Name, string(task.UID), task.Status.Attempt),
+	}
 	getErr := c.Get(context.Background(), cmKey, &cm)
 	if getErr == nil {
 		t.Errorf("transcript ConfigMap should NOT exist on deterministic runs, but it does")
@@ -2130,6 +2139,8 @@ func (f *fakeCoderJobSubmitter) Submit(
 // The in-process loop (RegistryFactory / clone / OAI) is never touched.
 func TestNativeExecutor_JobModeDispatchesToCoderJob(t *testing.T) {
 	agent, task := taskAndAgent("job-mode")
+	task.UID = "job-task-uid"
+	task.Status.Attempt = 2
 	deadline := int64(1800)
 	agent.Spec.Execution = &foremanv1alpha1.ExecutionSpec{
 		Mode:                  foremanv1alpha1.ExecutionModeJob,
@@ -2171,6 +2182,9 @@ func TestNativeExecutor_JobModeDispatchesToCoderJob(t *testing.T) {
 	}
 	if sub.gotReq.TaskName != task.Name || sub.gotReq.TaskNamespace != task.Namespace {
 		t.Errorf("request task identity: got %+v", sub.gotReq)
+	}
+	if sub.gotReq.AttemptKey != "job-task-uid-attempt-2" {
+		t.Fatalf("request lost execution identity: %+v", sub.gotReq)
 	}
 	if sub.gotReq.Image != "ghcr.io/defilantech/foreman-agent:dev" {
 		t.Errorf("request image: got %q", sub.gotReq.Image)

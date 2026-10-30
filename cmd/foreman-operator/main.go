@@ -103,7 +103,7 @@ func main() {
 	flag.IntVar(&webhookPort, "webhook-port", 9443,
 		"Port the webhook server listens on.")
 	flag.DurationVar(&auditRetention, "audit-retention", 7*24*time.Hour,
-		"Maximum age before an audit-record ConfigMap is reaped. "+
+		"Maximum age before an audit or retained transcript ConfigMap is reaped. "+
 			"Audit CMs are intentionally owner-unbound so they outlive the "+
 			"AgenticTask for compliance; without this reaper they accumulate "+
 			"unbounded (#990). Set to 0 to disable the reaper.")

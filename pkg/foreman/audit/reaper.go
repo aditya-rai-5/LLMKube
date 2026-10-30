@@ -33,8 +33,8 @@ import (
 // is purely cosmetic in the hot path.
 const defaultReaperInterval = time.Hour
 
-// Sweep deletes audit ConfigMaps whose CreationTimestamp is older than
-// retention. Returns the count deleted. retention <= 0 is a no-op
+// Sweep deletes audit and retained transcript ConfigMaps whose creation time
+// is older than retention. Returns the count deleted. retention <= 0 is a no-op
 // (returns 0, nil) so operators can disable the reaper via
 // --audit-retention=0 without redeploying with the feature stripped.
 //
@@ -63,6 +63,13 @@ func Sweep(ctx context.Context, c client.Client, retention time.Duration) (int, 
 	if err := c.List(ctx, &list, client.MatchingLabels{AuditLabel: "true"}); err != nil {
 		return 0, fmt.Errorf("audit reaper: list: %w", err)
 	}
+	// Transcripts have no task owner reference: failed evidence must survive
+	// delete-and-recreate retries. Sweep them even when no audit was produced.
+	var transcripts corev1.ConfigMapList
+	if err := c.List(ctx, &transcripts, client.MatchingLabels{TranscriptLabel: "true"}); err != nil {
+		return 0, fmt.Errorf("audit reaper: list transcripts: %w", err)
+	}
+	list.Items = append(list.Items, transcripts.Items...)
 	cutoff := time.Now().Add(-retention)
 	deleted := 0
 	for i := range list.Items {

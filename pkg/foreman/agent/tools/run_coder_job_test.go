@@ -685,8 +685,9 @@ func TestRunCoderJob_GOVerdictFromLog(t *testing.T) {
 		},
 	}
 
-	res, err := tool.Run(ctx, RunCoderJobArgs{
+	res, err := tool.Submit(ctx, foremanagent.CoderJobRequest{
 		TaskName:      "issue-510",
+		AttemptKey:    "task-uid-attempt-2",
 		TaskNamespace: "default",
 	})
 	if err != nil {
@@ -717,6 +718,9 @@ func TestRunCoderJob_GOVerdictFromLog(t *testing.T) {
 		t.Errorf("Image: %q", got)
 	}
 	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
+	if !strings.Contains(args, "--attempt-key=task-uid-attempt-2") {
+		t.Fatalf("Job lost expected attempt: %s", args)
+	}
 	if !strings.Contains(args, "run-task --task issue-510") {
 		t.Errorf("Job args missing run-task command:\n%s", args)
 	}

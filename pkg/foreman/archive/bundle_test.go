@@ -656,3 +656,37 @@ func readJSON(t *testing.T, path string, v any) {
 		t.Fatalf("unmarshal %s: %v", path, err)
 	}
 }
+
+func TestWriteBundleSeparateAttemptsWithSameTimestamp(t *testing.T) {
+	root := t.TempDir()
+	rec := testRecord()
+	rec.Attempt = 1
+	if err := WriteBundle(root, rec, []byte(`{"attempt":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := BundleDir(root, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Attempt = 2
+	if err := WriteBundle(root, rec, []byte(`{"attempt":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := BundleDir(root, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, dir := range []string{first, second} {
+		body, err := os.ReadFile(filepath.Join(dir, "transcript.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `{"attempt":1}`
+		if i == 1 {
+			want = `{"attempt":2}`
+		}
+		if string(body) != want {
+			t.Fatalf("bundle %s = %s, want %s", dir, body, want)
+		}
+	}
+}

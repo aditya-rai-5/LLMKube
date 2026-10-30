@@ -34,6 +34,7 @@ import (
 	"github.com/defilantech/llmkube/pkg/foreman/agent/githubpr"
 	"github.com/defilantech/llmkube/pkg/foreman/agent/repo"
 	"github.com/defilantech/llmkube/pkg/foreman/agent/worktracker"
+	"github.com/defilantech/llmkube/pkg/foreman/audit"
 )
 
 // RunTask is the standalone single-task runner: it executes ONE
@@ -97,6 +98,9 @@ const (
 // the same flags into both the watcher (in-process) and the Job
 // (run-task) modes.
 type RunTaskConfig struct {
+	// AttemptKey is supplied by the Job submitter. Empty allows manual runs.
+	AttemptKey string
+
 	// Client resolves the AgenticTask, its Agent, the InferenceService /
 	// provider Secret, and writes the transcript ConfigMap. Required.
 	Client client.Client
@@ -219,6 +223,10 @@ func RunTask(ctx context.Context, cfg RunTaskConfig) (RunTaskResult, error) {
 	if err := cfg.Client.Get(ctx, cfg.Task, &task); err != nil {
 		emitSentinel(out, RunTaskSentinelError, "")
 		return RunTaskResult{}, fmt.Errorf("get AgenticTask %s: %w", cfg.Task, err)
+	}
+	if cfg.AttemptKey != "" && cfg.AttemptKey != audit.AttemptKey(string(task.UID), task.Status.Attempt) {
+		emitSentinel(out, RunTaskSentinelError, "execution attempt superseded")
+		return RunTaskResult{}, fmt.Errorf("AgenticTask %s: execution attempt superseded", cfg.Task)
 	}
 
 	exec := &NativeAgentLoopExecutor{

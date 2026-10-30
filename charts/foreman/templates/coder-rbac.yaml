@@ -15,7 +15,7 @@ metadata:
 #     InferenceService from the API to resolve the executor's base URL.
 #   - For cloud-proxy providers, READS the Secret referenced by
 #     `providerConfig.apiKeySecretRef` to resolve the API key.
-#   - WRITES a per-task transcript ConfigMap (foreman-transcript-<task>)
+#   - WRITES a per-attempt transcript ConfigMap (foreman-transcript-<task>-<uid>-attempt-<n>)
 #     during the run so failing runs can be diagnosed post-hoc; without
 #     this the turn-by-turn transcript is lost and only the summary
 #     audit ConfigMap survives.
@@ -43,7 +43,7 @@ rules:
     verbs: ["get"]
   # Per-task transcript write. `get` + `create`/`update` mirror the
   # transcript writer's read-then-upsert flow; the writer targets a
-  # single ConfigMap (foreman-transcript-<task-name>) per run.
+  # single attempt-scoped transcript ConfigMap per run.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update"]

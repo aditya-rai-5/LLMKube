@@ -145,7 +145,7 @@ func (r *AgenticTaskReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// repeat. Under-counting on that rare failure path is the better
 		// trade: rates stay correct, whereas a repeated increment would inflate
 		// exactly the agents that are having trouble.
-		firstTerminal := task.Annotations[audit.AuditedAnnotation] != "true"
+		firstTerminal := !audit.IsRecorded(&task)
 		if firstTerminal {
 			if err := audit.RecordTerminal(ctx, r.Client, &task, r.AuditNamespace, log); err != nil {
 				// The dedup marker was not persisted, so the metric must not

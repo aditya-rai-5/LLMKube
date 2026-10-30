@@ -34,11 +34,27 @@ const (
 
 	// AuditedAnnotation guards against re-writing a record on every reconcile
 	// of an already-terminal task (which would emit duplicate audit lines).
-	AuditedAnnotation = "foreman.llmkube.dev/audited"
+	AuditedAnnotation        = "foreman.llmkube.dev/audited"
+	AuditedAttemptAnnotation = "foreman.llmkube.dev/audited-attempt"
+
+	// TranscriptLabel marks durable transcripts managed by the audit reaper.
+	TranscriptLabel = "foreman.llmkube.dev/retained-transcript"
 )
 
-// AuditConfigMapName returns the ConfigMap name for a task's audit record.
-func AuditConfigMapName(taskName string) string { return auditNamePrefix + taskName }
+// AuditConfigMapName returns the ConfigMap name for one execution record.
+func AuditConfigMapName(rec Record) string {
+	return ConfigMapName(auditNamePrefix, rec.Task.Name, rec.Task.UID, rec.Attempt)
+}
+
+// IsRecorded accepts the old boolean marker only for pre-counter executions.
+func IsRecorded(task *foremanv1alpha1.AgenticTask) bool {
+	if task.Annotations[AuditedAnnotation] != "true" {
+		return false
+	}
+	key := task.Annotations[AuditedAttemptAnnotation]
+	return key == AttemptKey(string(task.UID), task.Status.Attempt) ||
+		(key == "" && task.Status.Attempt == 0)
+}
 
 // ResolveAgent returns the task's Agent, or nil when there is no agentRef or
 // the object cannot be read. A missing Agent is not an error: the record is
@@ -74,7 +90,7 @@ func WriteRecord(ctx context.Context, c client.Client, namespace string, rec Rec
 	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      AuditConfigMapName(rec.Task.Name),
+			Name:      AuditConfigMapName(rec),
 			Namespace: namespace,
 			Labels: map[string]string{
 				AuditLabel:                  "true",
@@ -107,17 +123,18 @@ func WriteRecord(ctx context.Context, c client.Client, namespace string, rec Rec
 	// ConfigMap above is the primary record; this is the streaming copy.
 	log.Info("foreman.audit",
 		"task", rec.Task.Name, "namespace", rec.Task.Namespace,
+		"attempt", rec.Attempt, "taskUID", rec.Task.UID,
 		"verdict", rec.Verdict, "node", rec.AssignedNode,
 		"repo", rec.Repo, "issue", rec.Issue, "schemaVersion", rec.SchemaVersion)
 	return nil
 }
 
 // RecordTerminal writes the audit record for a terminal task exactly once.
-// It is a no-op if the task already carries AuditedAnnotation. auditNamespace
+// It is a no-op if this attempt is already recorded. auditNamespace
 // is the namespace for the record; empty means the task's own namespace. The
 // referenced Agent is fetched best-effort (a missing Agent yields a record
 // with no agent block, not an error). On success it stamps AuditedAnnotation
-// so subsequent reconciles skip the write.
+// and the attempt identity so subsequent reconciles skip only this run.
 func RecordTerminal(
 	ctx context.Context,
 	c client.Client,
@@ -125,7 +142,7 @@ func RecordTerminal(
 	auditNamespace string,
 	log logr.Logger,
 ) error {
-	if task.Annotations[AuditedAnnotation] == "true" {
+	if IsRecorded(task) {
 		return nil
 	}
 	ns := auditNamespace
@@ -140,11 +157,12 @@ func RecordTerminal(
 		return err
 	}
 
-	patch := client.MergeFrom(task.DeepCopy())
+	patch := client.MergeFromWithOptions(task.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	if task.Annotations == nil {
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[AuditedAnnotation] = "true"
+	task.Annotations[AuditedAttemptAnnotation] = AttemptKey(string(task.UID), task.Status.Attempt)
 	if err := c.Patch(ctx, task, patch); err != nil {
 		return fmt.Errorf("audit: set audited annotation: %w", err)
 	}

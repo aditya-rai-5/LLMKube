@@ -22,6 +22,7 @@ const SchemaVersion = "foreman.audit.v1"
 // Record is one terminal run's audit entry. Optional blocks are nil when
 // the run did not produce them (e.g. a coder run has no reviewer block).
 type Record struct {
+	Attempt           int64            `json:"attempt,omitempty"`
 	SchemaVersion     string           `json:"schemaVersion"`
 	RecordedAt        string           `json:"recordedAt,omitempty"`
 	Task              TaskRef          `json:"task"`
@@ -123,6 +124,7 @@ type resultPayload struct {
 // fabricated values. RecordedAt is the run's FinishedAt (deterministic).
 func BuildRecord(task *foremanv1alpha1.AgenticTask, agent *foremanv1alpha1.Agent) Record {
 	rec := Record{
+		Attempt:       task.Status.Attempt,
 		SchemaVersion: SchemaVersion,
 		Task: TaskRef{
 			Name:      task.Name,

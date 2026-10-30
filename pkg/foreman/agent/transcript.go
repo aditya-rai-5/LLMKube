@@ -28,6 +28,7 @@ import (
 
 	foremanv1alpha1 "github.com/defilantech/llmkube/api/foreman/v1alpha1"
 	"github.com/defilantech/llmkube/pkg/foreman/agent/oai"
+	"github.com/defilantech/llmkube/pkg/foreman/audit"
 )
 
 // TranscriptSchemaVersion identifies the on-disk shape of the transcript
@@ -73,15 +74,12 @@ type TranscriptMeta struct {
 // transcriptName returns the ConfigMap name for a task. We prefix to
 // keep transcript ConfigMaps trivially discoverable
 // (`kubectl get cm -l foreman.llmkube.dev/transcript-of=<task>`).
-func transcriptName(taskName string) string {
-	const prefix = "foreman-transcript-"
-	// ConfigMap name is a DNS-1123 subdomain (max 253). Task names are
-	// already a DNS-1123 label (max 63), so prefix+name comfortably fits.
-	return prefix + taskName
+func transcriptName(task *foremanv1alpha1.AgenticTask) string {
+	return audit.ConfigMapName("foreman-transcript-", task.Name, string(task.UID), task.Status.Attempt)
 }
 
-// WriteTranscript creates or updates a ConfigMap owner-ref'd to the
-// given task carrying the loop's transcript. Returns the LocalObject
+// WriteTranscript creates or updates a durable ConfigMap for this execution
+// attempt, retained by the audit reaper. Returns the LocalObject
 // reference the executor surfaces in Result.Extra.
 //
 // Over-budget transcripts are truncated from the middle. The head
@@ -148,13 +146,13 @@ func WriteTranscript(
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      transcriptName(task.Name),
+			Name:      transcriptName(task),
 			Namespace: task.Namespace,
 			Labels: map[string]string{
 				"foreman.llmkube.dev/transcript-of": task.Name,
 				"app.kubernetes.io/part-of":         "foreman",
+				audit.TranscriptLabel:               "true",
 			},
-			OwnerReferences: []metav1.OwnerReference{ownerRefForTask(task)},
 		},
 		Data: map[string]string{
 			transcriptDataKey: string(docBytes),
@@ -162,8 +160,8 @@ func WriteTranscript(
 		},
 	}
 
-	// Idempotent upsert: create on first run, update if a prior run on
-	// the same task wrote one (resumed task, retry-driven re-execute).
+	// Feedback loops can update a transcript within one execution. A new
+	// claim or task UID gets a different name and cannot overwrite it.
 	existing := &corev1.ConfigMap{}
 	key := client.ObjectKey{Namespace: cm.Namespace, Name: cm.Name}
 	getErr := c.Get(ctx, key, existing)
@@ -175,9 +173,7 @@ func WriteTranscript(
 	case getErr == nil:
 		existing.Data = cm.Data
 		existing.Labels = cm.Labels
-		// OwnerReferences are immutable through merge patches when the
-		// UID changes; for our case the task UID is stable across the
-		// run, so an Update is safe.
+		// Task GC must not remove evidence before the retention period ends.
 		existing.OwnerReferences = cm.OwnerReferences
 		if err := c.Update(ctx, existing); err != nil {
 			return corev1.ObjectReference{}, fmt.Errorf("WriteTranscript: update cm: %w", err)
@@ -192,22 +188,6 @@ func WriteTranscript(
 		Namespace:  cm.Namespace,
 		Name:       cm.Name,
 	}, nil
-}
-
-// ownerRefForTask builds the OwnerReference that ties a transcript
-// ConfigMap to its AgenticTask so the GC reaps it when the task is
-// deleted. BlockOwnerDeletion is true so a "delete the task" call does
-// not return before the cm is also marked for deletion.
-func ownerRefForTask(task *foremanv1alpha1.AgenticTask) metav1.OwnerReference {
-	yes := true
-	return metav1.OwnerReference{
-		APIVersion:         foremanv1alpha1.GroupVersion.String(),
-		Kind:               "AgenticTask",
-		Name:               task.Name,
-		UID:                task.UID,
-		Controller:         &yes,
-		BlockOwnerDeletion: &yes,
-	}
 }
 
 // truncateMessages keeps the head (system prompt + first user message), a

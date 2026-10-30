@@ -69,6 +69,7 @@ func TestRunTask_HappyPathPushesAndEmitsResult(t *testing.T) {
 
 	var out bytes.Buffer
 	cfg := foremanagent.RunTaskConfig{
+		AttemptKey:   string(task.UID) + "-attempt-0",
 		Client:       c,
 		Task:         types.NamespacedName{Namespace: task.Namespace, Name: task.Name},
 		WorkspaceDir: filepath.Join(root, "ws"),
