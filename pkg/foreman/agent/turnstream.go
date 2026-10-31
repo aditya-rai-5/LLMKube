@@ -40,9 +40,17 @@ type TurnStream struct {
 	subs     map[*subscriber]struct{}
 }
 
+// ProgressEvent is live-only; it never occupies completed-turn replay capacity.
+type ProgressEvent struct {
+	Turn int `json:"turn"`
+	oai.Progress
+	At time.Time `json:"at"`
+}
+
 type subscriber struct {
-	ch   chan TurnEvent
-	once sync.Once
+	progress chan ProgressEvent
+	ch       chan TurnEvent
+	once     sync.Once
 }
 
 // NewTurnStream returns a stream retaining the last capacity turns for replay.
@@ -82,6 +90,11 @@ func (s *TurnStream) Publish(turn int, msgs []oai.Message) {
 	s.ring = append(s.ring, ev)
 
 	for sub := range s.subs {
+		// A completed turn supersedes its pending progress.
+		select {
+		case <-sub.progress:
+		default:
+		}
 		select {
 		case sub.ch <- ev:
 		default: // slow consumer; drop rather than stall the loop
@@ -103,10 +116,15 @@ func (s *TurnStream) PublishTurn(turn int, msgs []oai.Message) {
 // registers the subscriber, so no turn is missed or duplicated across the
 // replay-to-live handover.
 func (s *TurnStream) Subscribe() (<-chan TurnEvent, func()) {
+	sub, cancel := s.subscribe(false)
+	return sub.ch, cancel
+}
+
+func (s *TurnStream) subscribe(withProgress bool) (*subscriber, func()) {
 	if s == nil {
 		ch := make(chan TurnEvent)
 		close(ch)
-		return ch, func() {}
+		return &subscriber{ch: ch}, func() {}
 	}
 
 	s.mu.Lock()
@@ -115,17 +133,23 @@ func (s *TurnStream) Subscribe() (<-chan TurnEvent, func()) {
 	// Buffer the backlog plus headroom for live turns arriving while the
 	// consumer works through it.
 	sub := &subscriber{ch: make(chan TurnEvent, len(s.ring)+s.capacity)}
+	if withProgress {
+		sub.progress = make(chan ProgressEvent, 1)
+	}
 	for _, ev := range s.ring {
 		sub.ch <- ev
 	}
 	s.subs[sub] = struct{}{}
 
-	return sub.ch, func() {
+	return sub, func() {
 		sub.once.Do(func() {
 			s.mu.Lock()
 			delete(s.subs, sub)
 			s.mu.Unlock()
 			close(sub.ch)
+			if sub.progress != nil {
+				close(sub.progress)
+			}
 		})
 	}
 }
@@ -153,4 +177,33 @@ func (e *NativeAgentLoopExecutor) turnHook() func(int, []oai.Message) {
 		return nil
 	}
 	return e.Stream.PublishTurn
+}
+
+// PublishProgress keeps only the latest pending progress for each live viewer,
+// independently of completed turns. A slow viewer cannot stall generation.
+func (s *TurnStream) PublishProgress(turn int, progress oai.Progress) {
+	if s == nil {
+		return
+	}
+	ev := ProgressEvent{Turn: turn, Progress: progress, At: time.Now()}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sub := range s.subs {
+		if sub.progress == nil {
+			continue
+		}
+		select {
+		case <-sub.progress:
+		default:
+		}
+		// Publishers hold mu, so the drained buffer always has a free slot.
+		sub.progress <- ev
+	}
+}
+
+func (e *NativeAgentLoopExecutor) progressHook() func(int, oai.Progress) {
+	if e.Stream == nil {
+		return nil
+	}
+	return e.Stream.PublishProgress
 }

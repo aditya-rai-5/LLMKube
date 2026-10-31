@@ -226,6 +226,10 @@ type LoopConfig struct {
 	// consumer would stall the coder. Implementations send non-blocking and
 	// drop rather than wait.
 	OnTurn func(turn int, msgs []oai.Message)
+
+	// OnProgress reports in-flight output for providers that support it. Like
+	// OnTurn it must not block, and nil disables progress reporting.
+	OnProgress func(turn int, progress oai.Progress)
 }
 
 // DefaultContextWindowTokens is the budget used when LoopConfig.ContextWindowTokens
@@ -1184,6 +1188,18 @@ func (l *Loop) applyTerminalGate(
 	return false
 }
 
+// Keep ChatCompleter compatible with providers that only publish completed turns.
+func (l *Loop) chat(ctx context.Context, cfg LoopConfig, turn int, req oai.ChatRequest) (*oai.ChatResponse, error) {
+	if cfg.OnProgress != nil {
+		if client, ok := l.client.(interface {
+			ChatWithProgress(context.Context, oai.ChatRequest, func(oai.Progress)) (*oai.ChatResponse, error)
+		}); ok {
+			return client.ChatWithProgress(ctx, req, func(p oai.Progress) { cfg.OnProgress(turn, p) })
+		}
+	}
+	return l.client.Chat(ctx, req)
+}
+
 // runOneTurn drives one chat-completions request + tool dispatch. It
 // appends to res.Transcript in place. Returns errTerminalReached when
 // the model invoked the terminal (submit_result) tool. editSucceeded
@@ -1224,7 +1240,7 @@ func (l *Loop) runOneTurn(
 		// is byte-identical to today for agents that do not set it.
 		ChatTemplateKwargs: cfg.ChatTemplateKwargs,
 	}
-	resp, err := l.client.Chat(ctx, req)
+	resp, err := l.chat(ctx, cfg, res.Turns, req)
 	if err != nil && req.Temperature != nil && rejectsTemperature(err) {
 		// Some providers reject the field outright rather than ignoring it:
 		// current Anthropic models answer 400 with "`temperature` is
@@ -1234,7 +1250,7 @@ func (l *Loop) runOneTurn(
 		// making every operator discover this and edit their Agent.
 		span.AddEvent("temperature rejected by provider, retrying without it")
 		req.Temperature = nil
-		resp, err = l.client.Chat(ctx, req)
+		resp, err = l.chat(ctx, cfg, res.Turns, req)
 	}
 	if err != nil {
 		span.RecordError(err)

@@ -132,6 +132,14 @@ func New(baseURL string, requestTimeout time.Duration, maxRetries int, opts ...O
 // failure, SSE parse failure) is returned to the caller immediately
 // without retry.
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	return c.ChatWithProgress(ctx, req, nil)
+}
+
+// ChatWithProgress reports output as it arrives. The callback must not block;
+// it is request-local and may be nil. Attempts and counters restart per Chat.
+func (c *Client) ChatWithProgress(
+	ctx context.Context, req ChatRequest, onProgress func(Progress),
+) (*ChatResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -139,7 +147,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 				return nil, err
 			}
 		}
-		resp, err := c.doOnce(ctx, req)
+		resp, err := c.doOnce(ctx, req, &progressReporter{callback: onProgress, attempt: attempt + 1})
 		if err == nil {
 			return resp, nil
 		}
@@ -245,7 +253,7 @@ func (c *Client) sleepBackoff(ctx context.Context, i int) error {
 //   - ErrNoChoices                  :: 2xx but no choices arrived in the stream
 //   - a wrapped status error        :: non-2xx, body included in the message
 //   - a wrapped transport error     :: dial / TLS / read failure
-func (c *Client) doOnce(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+func (c *Client) doOnce(ctx context.Context, req ChatRequest, progress *progressReporter) (*ChatResponse, error) {
 	// Force streaming on the wire regardless of caller setting.
 	req.Stream = true
 	body, err := json.Marshal(req)
@@ -291,7 +299,7 @@ func (c *Client) doOnce(ctx context.Context, req ChatRequest) (*ChatResponse, er
 		return nil, &StatusError{Code: resp.StatusCode, Body: string(b)}
 	}
 
-	parsed, err := readSSEStream(resp.Body)
+	parsed, err := readSSEStream(resp.Body, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +325,7 @@ func (c *Client) doOnce(ctx context.Context, req ChatRequest) (*ChatResponse, er
 // tool-call argument fragments. The aggregator keys tool calls by their
 // Index across deltas and concatenates Function.Arguments into the
 // final string.
-func readSSEStream(body io.Reader) (*ChatResponse, error) {
+func readSSEStream(body io.Reader, progress *progressReporter) (*ChatResponse, error) {
 	scanner := bufio.NewScanner(body)
 	// SSE lines can be arbitrarily long (a single chunk may carry a
 	// large content burst). Set a generous max-token size so the
@@ -348,6 +356,9 @@ func readSSEStream(body io.Reader) (*ChatResponse, error) {
 			return nil, fmt.Errorf("decode SSE chunk: %w (line=%q)", err, payload)
 		}
 		agg.absorb(chunk)
+		if progress.callback != nil {
+			progress.observe(chunk, time.Now())
+		}
 
 		// Some llama.cpp builds + response shapes (notably thinking-trace
 		// models emitting tool calls) finish the model output but never

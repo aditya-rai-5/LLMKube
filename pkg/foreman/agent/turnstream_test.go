@@ -145,3 +145,72 @@ func TestTurnHook_StreamYieldsWorkingHook(t *testing.T) {
 		t.Error("hook did not deliver the turn to a subscriber")
 	}
 }
+
+func TestTurnStream_ProgressLiveOnlyAndBounded(t *testing.T) {
+	s := NewTurnStream(1)
+	s.Publish(1, []oai.Message{{Role: oai.RoleAssistant, Content: "done"}})
+	s.PublishProgress(2, oai.Progress{Tokens: 1})
+	sub, cancel := s.subscribe(true)
+	defer cancel()
+	if ev := <-sub.ch; ev.Turn != 1 {
+		t.Fatalf("replayed turn=%d", ev.Turn)
+	}
+	select {
+	case ev := <-sub.progress:
+		t.Fatalf("replayed stale progress: %+v", ev)
+	default:
+	}
+	turns, stop := s.Subscribe()
+	defer stop()
+	<-turns // replay
+	done := make(chan struct{})
+	go func() {
+		for i := 1; i <= 1000; i++ {
+			s.PublishProgress(2, oai.Progress{Tokens: i})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("progress blocked generation")
+	}
+	if ev := <-sub.progress; ev.Tokens != 1000 {
+		t.Fatalf("latest progress=%+v", ev)
+	}
+	select {
+	case ev := <-turns:
+		t.Fatalf("turn-only subscriber received progress: %+v", ev)
+	default:
+	}
+	// Progress neither evicts turns from replay nor fills their live queue.
+	late, stopLate := s.Subscribe()
+	defer stopLate()
+	if ev := <-late; ev.Turn != 1 {
+		t.Fatalf("progress evicted replay: %+v", ev)
+	}
+	s.PublishProgress(2, oai.Progress{Tokens: 1001})
+	s.Publish(2, []oai.Message{{Role: oai.RoleAssistant, Content: "finished"}})
+	if ev := <-sub.ch; ev.Turn != 2 {
+		t.Fatalf("completed turn=%+v", ev)
+	}
+	select {
+	case ev := <-sub.progress:
+		t.Fatalf("stale progress after completion: %+v", ev)
+	default:
+	}
+	cancel()
+	cancel()
+	s.PublishProgress(3, oai.Progress{Tokens: 1})
+	if _, open := <-sub.progress; open {
+		t.Fatal("progress channel left open after cancel")
+	}
+}
+
+func TestProgressHook_NilStream(t *testing.T) {
+	if hook := (&NativeAgentLoopExecutor{}).progressHook(); hook != nil {
+		t.Fatal("nil stream enabled progress")
+	}
+	var s *TurnStream
+	s.PublishProgress(1, oai.Progress{Tokens: 1})
+}

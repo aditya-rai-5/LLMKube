@@ -17,9 +17,15 @@ limitations under the License.
 package agent_test
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	fake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -145,5 +151,106 @@ func TestNativeExecutor_NilStreamDoesNotPanic(t *testing.T) {
 	}
 	if res.Verdict != foremanv1alpha1.AgenticTaskVerdictGo {
 		t.Fatalf("verdict with nil stream: want GO got %s", res.Verdict)
+	}
+}
+
+// This must see progress before the upstream finishes, through the real
+// executor wiring and HTTP handler, rather than publishing an event by hand.
+func TestNativeExecutor_ProgressBeforeCompletion(t *testing.T) {
+	gitOrSkip(t)
+	root := t.TempDir()
+	bare := initBareWithSeed(t, root)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[` +
+			`{"index":0,"id":"tc-1","type":"function","function":{"name":"submit_result",` +
+			`"arguments":"{\"verdict\":\"GO\",\"summary\":\"fixed\"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"))
+	}))
+	defer upstream.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream := foremanagent.NewTurnStream(4)
+	server := httptest.NewServer(stream.Handler())
+	defer server.Close()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	for stream.SubscriberCount() == 0 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("stream did not subscribe")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	e := streamWiringExecutor(t, root, bare, upstream.URL, stream)
+	agent, task := taskAndAgent("stream-wiring")
+	done := make(chan error, 1)
+	go func() { _, err := e.Execute(ctx, task, agent); done <- err }()
+	// Cancel before waiting for the HTTP servers during failure cleanup.
+	defer cancel()
+	reader := bufio.NewReader(resp.Body)
+	name, payload, err := readStreamFrame(reader)
+	if err != nil {
+		t.Fatalf("no progress before completion: %v", err)
+	}
+	if name != "progress" {
+		t.Fatalf("event = %q, want progress", name)
+	}
+	var progress struct {
+		Turn      int  `json:"turn"`
+		Tokens    int  `json:"tokens"`
+		Attempt   int  `json:"attempt"`
+		Estimated bool `json:"estimated"`
+	}
+	if err := json.Unmarshal([]byte(payload), &progress); err != nil {
+		t.Fatal(err)
+	}
+	if progress.Turn != 1 || progress.Tokens != 1 || progress.Attempt != 1 || !progress.Estimated {
+		t.Fatalf("unexpected progress: %+v", progress)
+	}
+	if strings.Contains(payload, "thinking") {
+		t.Fatal("progress leaked reasoning text")
+	}
+	close(release)
+	name, payload, err = readStreamFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "" || !strings.Contains(payload, "submit_result") {
+		t.Fatalf("completed turn wire format changed: event=%q data=%s", name, payload)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readStreamFrame(r *bufio.Reader) (name, data string, err error) {
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return "", "", err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" && data != "" {
+			return name, data, nil
+		}
+		if v, ok := strings.CutPrefix(line, "event: "); ok {
+			name = v
+		}
+		if v, ok := strings.CutPrefix(line, "data: "); ok {
+			data = v
+		}
 	}
 }

@@ -323,3 +323,37 @@ non-breaking extension. Pinning the foundation is the work of
 
 If your shop fits the target profile (on-prem GPU, sovereignty
 constraint, K8s in production), we'd love to hear about your fleet.
+
+## Watching a native agent run
+
+The Foreman agent serves `GET /stream` at `127.0.0.1:8082` by default.
+Use `curl -N http://127.0.0.1:8082/stream` on the agent host (or port-forward
+an agent pod). `--turn-stream-bind-address=0` disables the endpoint.
+It is unauthenticated; keep the loopback binding unless you deliberately
+want to expose the completed-turn transcripts.
+
+Completed turns are ordinary SSE `data:` frames, replayed up to
+`--turn-stream-replay-turns` (default 64). During OpenAI-compatible generation
+(local or cloud-proxy provider), live viewers also receive named events:
+
+```text
+event: progress
+data: {"turn":1,"tokens":42,"attempt":1,"estimated":true,"at":"2026-10-31T12:00:00Z"}
+```
+
+`tokens` counts output-bearing deltas, including reasoning and tool calls.
+It is an estimate: servers can batch multiple tokens into one delta.
+The counter resets for each completion attempt; `attempt` is 1-based and
+increases on client retries within a request. Turn numbers follow the existing
+completed-turn stream and restart for each loop run.
+
+The first output delta emits immediately; subsequent updates are at most once
+every two seconds while output arrives. Progress is live-only, contains no
+partial text, and never consumes turn replay capacity. Slow viewers may miss
+updates; only the latest pending progress is kept. A quiet progress feed means
+no new output has been observed, not proof that the server is hung (it may be
+processing the prompt). The existing SSE keepalive comments only indicate an
+open connection. Native Anthropic currently emits completed turns only.
+
+Browser clients can use `source.addEventListener("progress", handler)` for
+progress while keeping `source.onmessage` for completed turns.

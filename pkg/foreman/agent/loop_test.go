@@ -1889,3 +1889,42 @@ func TestLoop_OnTurnNilIsSafe(t *testing.T) {
 		t.Fatalf("a nil OnTurn must not change loop behaviour, got %v", err)
 	}
 }
+
+func TestLoop_OnProgressTurnNumbersAndFallback(t *testing.T) {
+	for _, mode := range []string{"supported", "unsupported", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			srv, _ := scriptedOAIServer(t, []string{toolCallReadFile, toolCallReadFile})
+			reg := &fakeRegistry{results: map[string]*ToolResult{"read_file": {Output: "read"}}}
+			loop := newTestLoop(srv, reg)
+			if mode == "unsupported" {
+				// Hide the optional method, matching a Chat-only provider such as Anthropic.
+				loop.client = struct{ ChatCompleter }{loop.client}
+			}
+			var turns []int
+			completed := 0
+			cfg := LoopConfig{Model: "test", MaxTurns: 2,
+				OnProgress: func(turn int, p oai.Progress) {
+					turns = append(turns, turn)
+					if p.Tokens != 1 || p.Attempt != 1 {
+						t.Errorf("counter did not reset for turn %d: %+v", turn, p)
+					}
+				},
+				OnTurn: func(int, []oai.Message) { completed++ },
+			}
+			if mode == "disabled" {
+				cfg.OnProgress = nil
+			}
+			_, err := loop.Run(context.Background(), cfg)
+			if !errors.Is(err, ErrMaxTurnsExhausted) || completed != 2 {
+				t.Fatalf("completed=%d, error=%v", completed, err)
+			}
+			if mode == "supported" {
+				if len(turns) != 2 || turns[0] != 1 || turns[1] != 2 {
+					t.Fatalf("progress turns=%v", turns)
+				}
+			} else if len(turns) != 0 {
+				t.Fatalf("unexpected progress: %v", turns)
+			}
+		})
+	}
+}

@@ -913,7 +913,8 @@ func (e *NativeAgentLoopExecutor) runLLMPath(
 		// Live turn streaming, opt-in. A method rather than an inline nil
 		// check because this function sits at the gocyclo ceiling; see
 		// turnHook for why the nil case must stay a nil hook.
-		OnTurn: e.turnHook(),
+		OnTurn:     e.turnHook(),
+		OnProgress: e.progressHook(),
 	}
 
 	// Coder gate feedback loop (#749): coders verify their work through a

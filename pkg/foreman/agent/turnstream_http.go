@@ -38,7 +38,7 @@ func (s *TurnStream) Handler() http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
-		events, cancel := s.Subscribe()
+		sub, cancel := s.subscribe(true)
 		defer cancel()
 
 		ticker := time.NewTicker(turnStreamKeepalive)
@@ -49,7 +49,7 @@ func (s *TurnStream) Handler() http.HandlerFunc {
 			select {
 			case <-r.Context().Done():
 				return
-			case ev, open := <-events:
+			case ev, open := <-sub.ch:
 				if !open {
 					return
 				}
@@ -58,6 +58,20 @@ func (s *TurnStream) Handler() http.HandlerFunc {
 				}
 				// Encode writes a trailing newline; SSE needs a blank line to
 				// terminate the frame, hence the second one below.
+				if err := enc.Encode(ev); err != nil {
+					return
+				}
+				if _, err := w.Write([]byte("\n")); err != nil {
+					return
+				}
+				flusher.Flush()
+			case ev, open := <-sub.progress:
+				if !open {
+					return
+				}
+				if _, err := w.Write([]byte("event: progress\ndata: ")); err != nil {
+					return
+				}
 				if err := enc.Encode(ev); err != nil {
 					return
 				}
